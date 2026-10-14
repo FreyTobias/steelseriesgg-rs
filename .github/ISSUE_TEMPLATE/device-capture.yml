@@ -1,0 +1,41 @@
+name: Device capture
+description: Share a SteelSeries GG capture so your device can be supported
+title: "Device capture: <device name> (PID 0x....)"
+labels: ["device-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Record the capture with `scripts/capture-device.ps1`, see
+        [adding-hardware.md](https://github.com/Ven0m0/steelseriesgg-rs/blob/main/docs/development/adding-hardware.md).
+        Do not attach captures recorded while you typed passwords or private text.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Name as shown in GG, and PID from summary.md
+      placeholder: Apex 7 TKL, PID 0x1618
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - USB cable
+        - Wireless dongle
+        - Bluetooth
+    validations:
+      required: true
+  - type: textarea
+    id: capture
+    attributes:
+      label: Capture
+      description: Drag the ssgg-capture-<pid>.zip here. Add device.pcap (zipped) if it is under 25 MB, or link it.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Steps you skipped or did differently, what ssgg already does with this device, firmware version from GG.

@@ -362,6 +362,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Issues and PRs are welcome. Please run `cargo fmt && cargo clippy --all-targets --locked` before submitting.
 
+Device not supported yet? Record a guided capture of SteelSeries GG with `scripts/capture-device.ps1` and
+share it; see [docs/development/adding-hardware.md](docs/development/adding-hardware.md).
+
 ## Acknowledgments
 
 - [hidapi](https://crates.io/crates/hidapi) - HID access

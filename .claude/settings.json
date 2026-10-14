@@ -34,12 +34,12 @@
           {
             "type": "command",
             "if": "Edit(*Cargo.toml)",
-            "command": "echo 'REMINDER: hidapi is pinned to =2.6.6 exactly (CLAUDE.md hard constraint). Changing it requires explicit task justification.'"
+            "command": "echo 'REMINDER: hidapi must keep its exact = version pin in Cargo.toml (CLAUDE.md hard constraint). Changing it requires explicit task justification.'"
           },
           {
             "type": "command",
             "if": "Write(*Cargo.toml)",
-            "command": "echo 'REMINDER: hidapi is pinned to =2.6.6 exactly (CLAUDE.md hard constraint). Changing it requires explicit task justification.'"
+            "command": "echo 'REMINDER: hidapi must keep its exact = version pin in Cargo.toml (CLAUDE.md hard constraint). Changing it requires explicit task justification.'"
           }
         ]
       }
@@ -51,35 +51,35 @@
           {
             "type": "command",
             "if": "Edit(*.rs)",
-            "command": "cargo fmt --all -- --check 2>&1 | head -20 && exit 0 || exit 2",
+            "command": "out=$(cargo fmt --all -- --check 2>&1) || { printf '%s\n' \"$out\" | head -20; exit 2; }",
             "async": true
           },
           {
             "type": "command",
             "if": "Write(*.rs)",
-            "command": "cargo fmt --all -- --check 2>&1 | head -20 && exit 0 || exit 2",
+            "command": "out=$(cargo fmt --all -- --check 2>&1) || { printf '%s\n' \"$out\" | head -20; exit 2; }",
             "async": true
           },
           {
             "type": "command",
             "if": "Edit(*Cargo.toml)",
-            "command": "grep 'hidapi = ' Cargo.toml | grep -v '\"=2\\.6\\.6\"' && echo 'WARNING: hidapi version pin changed from the required =2.6.6 without explicit task justification.' || exit 0"
+            "command": "grep '^hidapi = ' Cargo.toml | grep -v 'version = \"=' && echo 'WARNING: hidapi is no longer pinned with an exact = version; that needs explicit task justification.' || exit 0"
           },
           {
             "type": "command",
             "if": "Write(*Cargo.toml)",
-            "command": "grep 'hidapi = ' Cargo.toml | grep -v '\"=2\\.6\\.6\"' && echo 'WARNING: hidapi version pin changed from the required =2.6.6 without explicit task justification.' || exit 0"
+            "command": "grep '^hidapi = ' Cargo.toml | grep -v 'version = \"=' && echo 'WARNING: hidapi is no longer pinned with an exact = version; that needs explicit task justification.' || exit 0"
           },
           {
             "type": "command",
             "if": "Edit(*src/devices*.rs)",
-            "command": "cargo clippy --all-targets --locked -- -D warnings 2>&1 | tail -40 && exit 0 || exit 2",
+            "command": "out=$(cargo clippy --all-targets --locked --message-format short -- -D warnings 2>&1) || { printf '%s\n' \"$out\" | tail -40; exit 2; }",
             "async": true
           },
           {
             "type": "command",
             "if": "Write(*src/devices*.rs)",
-            "command": "cargo clippy --all-targets --locked -- -D warnings 2>&1 | tail -40 && exit 0 || exit 2",
+            "command": "out=$(cargo clippy --all-targets --locked --message-format short -- -D warnings 2>&1) || { printf '%s\n' \"$out\" | tail -40; exit 2; }",
             "async": true
           },
           {

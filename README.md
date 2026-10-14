@@ -339,7 +339,7 @@ The project includes developer and testing utilities:
 
 | Crate | Purpose |
 |-------|---------|
-| hidapi | HID device communication (pinned =2.6.6) |
+| hidapi | HID device communication (exact version pin, see `Cargo.toml`) |
 | tokio | Async runtime |
 | axum | GameSense HTTP server |
 | reqwest | Sonar HTTP client (optional, `sonar` feature) |

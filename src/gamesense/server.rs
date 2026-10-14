@@ -443,6 +443,54 @@ async fn remove_event(State(state): State<AppState>, Json(req): Json<RemoveEvent
 mod tests {
     use super::*;
 
+    /// Serve the router on an ephemeral port (without `run`, so coreProps.json is never written)
+    /// and return the raw response head for a `GET /` carrying the given `Origin`.
+    async fn get_with_origin(origin: &str) -> String {
+        use std::io::{Read, Write};
+
+        let server = GameSenseServer::new("127.0.0.1", 0).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = server.router();
+        let serve = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let origin = origin.to_string();
+        let response = tokio::task::spawn_blocking(move || {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let request =
+                format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nConnection: close\r\n\r\n");
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        })
+        .await
+        .unwrap();
+        serve.abort();
+        response.to_lowercase()
+    }
+
+    #[tokio::test]
+    async fn test_cors_rejects_foreign_origin() {
+        let response = get_with_origin("http://evil.example").await;
+        assert!(response.starts_with("http/1.1 200"), "unexpected response: {response}");
+        assert!(
+            !response.contains("access-control-allow-origin"),
+            "foreign origin must not receive CORS headers: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cors_allows_localhost_origins() {
+        for origin in ["http://localhost:3000", "http://127.0.0.1:3000"] {
+            let response = get_with_origin(origin).await;
+            assert!(
+                response.contains(&format!("access-control-allow-origin: {origin}")),
+                "{origin} should be allowed: {response}"
+            );
+        }
+    }
+
     #[test]
     fn test_compute_color_static() {
         let handler = ColorHandler::Static {

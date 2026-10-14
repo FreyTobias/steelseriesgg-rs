@@ -219,16 +219,6 @@ async fn collect_device_states() -> Result<Vec<DeviceSnapshot>> {
     Ok(snapshots)
 }
 
-/// Collect performance metrics snapshot (async).
-///
-/// Returns None if no performance monitoring is active.
-async fn collect_performance_snapshot() -> Result<Option<RgbTimingMetrics>> {
-    // Placeholder: Would require integration with active performance monitoring session
-    // For now, return None since we don't have a global performance manager
-    debug!("Performance snapshot requested but no active monitoring session");
-    Ok(None)
-}
-
 /// Read HID diagnostic logs if available (async).
 async fn collect_hid_logs() -> Result<Option<Vec<String>>> {
     // Look for HID diagnostic log files in the secure logs directory
@@ -310,15 +300,13 @@ pub async fn collect_bug_report(include_hid_logs: bool, include_performance: boo
         Vec::new()
     });
 
-    // Collect performance metrics if requested (async)
-    let performance_metrics = if include_performance {
-        collect_performance_snapshot().await.unwrap_or_else(|e| {
-            warn!("Failed to collect performance metrics: {}", e);
-            None
-        })
-    } else {
-        None
-    };
+    // Performance metrics live in the daemon process; the CLI has no way to sample them yet.
+    if include_performance {
+        warn!(
+            "Performance snapshot is not available yet (it requires the running daemon); omitting it from the report"
+        );
+    }
+    let performance_metrics = None;
 
     // Collect HID logs if requested (async)
     let hid_logs = if include_hid_logs {

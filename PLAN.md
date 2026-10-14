@@ -33,7 +33,7 @@ is dropped from this plan.
 - Read `CLAUDE.md` (same content as `AGENTS.md`) before making code changes.
 - Source-of-truth files when prose drifts:
   `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `src/devices/hid_reports.rs`.
-- Keep `hidapi = "=2.6.6"` pinned unless the task explicitly requires changing it.
+- Keep the exact `=` pin on `hidapi` (see `Cargo.toml`) unless the task explicitly requires changing it.
 - Do not loosen the localhost-only GameSense CORS policy.
 - Keep `audio` and `sonar` feature gating independent.
 - Always build HID reports with `HidReportBuilder` / typed helpers — never hand-rolled byte arrays.

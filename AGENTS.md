@@ -61,18 +61,9 @@ Run the smallest relevant subset for any given change.
 | Test | `cargo test --locked` |
 | Release build | `cargo build --release --locked` |
 
-Add `--features <flag>` when touching feature-gated code.
-
-### CI feature matrix
-
-| Job | Feature variants |
-|-----|-----------------|
-| **fmt** | default only |
-| **clippy** | `""`, `--features sonar`, `--features audio` |
-| **test** | `""`, `--features sonar` (audio excluded — needs `libpulse-dev`) |
-| **build** | `""`, `--features sonar`, `--features audio` |
-
-The `audio` feature requires `libpulse-dev` on Debian/Ubuntu (`sudo apt-get install -y libpulse-dev`).
+Add `--features <flag>` when touching feature-gated code. The CI feature matrix is in
+`.github/workflows/ci.yml`; the `ci-matrix` skill runs it locally. The `audio` feature needs `libpulse-dev` on
+Debian/Ubuntu.
 
 ---
 
@@ -124,9 +115,7 @@ The `audio` feature requires `libpulse-dev` on Debian/Ubuntu (`sudo apt-get inst
 ## Protocol research notes
 
 - `docs/development/` is historical and may be outdated; verify against current source before acting on it.
-- `CommandCode::PerKeyRgb (0x23)` is a placeholder; actual per-key command is unknown.
-- `CommandCode::Apex2023Direct (0x40)` is experimental (see `src/devices/keyboards/apex_pro_tkl_2023.rs`).
-- `CommandCode::ActuationControl (0x2D)` is experimental; the firmware read-back command is unknown (probe with `src/bin/discover_actuation.rs`).
+- Command-code status (confirmed / experimental / placeholder) lives in `.claude/rules/experimental-protocol.md`.
 
 ---
 

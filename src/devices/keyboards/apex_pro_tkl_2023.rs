@@ -34,6 +34,59 @@ const TKL_KEYS: &[u8] = &[
     0xFB,
 ];
 
+/// [EXPERIMENTAL] Key table SteelSeries GG sends to the wired Apex Pro TKL 2023 (PID 0x1628).
+/// Read from a USBPcap capture of GG (2026-10-14, firmware 1.19.7); order is GG's, count byte was
+/// always 0x54. See docs/development/apex-pro-tkl-2023-gg-capture.md.
+const WIRED_2023_KEYS: &[u8] = &[
+    0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+    0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x29, 0x2A,
+    0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0xE0, 0xE1, 0xE2,
+    0xE3, 0xE4, 0xE5, 0xE7, 0xF0, 0x28, 0x31, 0xE6,
+];
+
+/// [EXPERIMENTAL] Report-ID byte plus the 644 bytes GG puts on the wire for the wired 2023 model.
+const WIRED_2023_PACKET_LENGTH: usize = 645;
+
+/// [EXPERIMENTAL] Slot order of the per-key tables in GG's 12,500-byte profile blob for the wired
+/// Apex Pro TKL 2023 (PID 0x1628): index = slot, value = HID usage. Physical rows, left to right.
+///
+/// Source: GG USBPcap captures and GG's engine database (2026-10-14, firmware 1.19.7).
+/// - Captured with a single-key edit: slots 1, 16, 24, 27, 29, 37, 41, 42, 44, 53, 55, 56, 57, 58, 60, 63-67.
+/// - Matched as a set against GG's stored config: ISO/JIS keys (13, 40, 43, 54, 59, 61, 62; identity within
+///   the set follows the JIS/ISO layout) and Tab/Caps (14, 28).
+/// - Remaining slots follow the row order; slot 0 (grave) is the only key left for it.
+///
+/// Writing the blob is blocked: its checksum at offset 12320 is unsolved.
+pub const WIRED_2023_PROFILE_SLOTS: [u8; 68] = [
+    // ` 1 2 3 4 5 6 7 8 9 0 - = Yen
+    0x35, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2D, 0x2E, 0x89,
+    // Tab Q W E R T Y U I O P [ ] \
+    0x2B, 0x14, 0x1A, 0x08, 0x15, 0x17, 0x1C, 0x18, 0x0C, 0x12, 0x13, 0x2F, 0x30, 0x31,
+    // Caps A S D F G H J K L ; ' ISO-# Enter
+    0x39, 0x04, 0x16, 0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x33, 0x34, 0x32, 0x28,
+    // LShift ISO-\ Z X C V B N M , . / Ro RShift
+    0xE1, 0x64, 0x1D, 0x1B, 0x06, 0x19, 0x05, 0x11, 0x10, 0x36, 0x37, 0x38, 0x87, 0xE5,
+    // LCtrl LGui LAlt Muhenkan Space Henkan Kana RAlt RGui Fn RCtrl Backspace
+    0xE0, 0xE3, 0xE2, 0x8B, 0x2C, 0x8A, 0x88, 0xE6, 0xE7, 0xF0, 0xE4, 0x2A,
+];
+
+/// [EXPERIMENTAL] Profile-blob offset of the actuation-point table (GG `hall_thresholds.h`).
+/// Each per-key table has 70 slots; slots 68-69 are unused.
+pub const PROFILE_ACTUATION_OFFSET: usize = 1084;
+/// [EXPERIMENTAL] Reset point (GG `hall_thresholds.l`).
+pub const PROFILE_RESET_OFFSET: usize = 1154;
+/// [EXPERIMENTAL] Release mode (GG `release_mode`): 0 off, 2 Rapid Trigger, 3 Key Guard.
+pub const PROFILE_RELEASE_MODE_OFFSET: usize = 1446;
+/// [EXPERIMENTAL] Rapid Trigger sensitivity (GG `rapid_trigger_sensitivity`).
+pub const PROFILE_RT_SENSITIVITY_OFFSET: usize = 1516;
+
+/// [EXPERIMENTAL] Slot of an analog key in the wired 2023 profile tables, or `None` for keys
+/// without one (Esc, F-row, navigation cluster).
+pub fn profile_slot(usage: u8) -> Option<usize> {
+    WIRED_2023_PROFILE_SLOTS.iter().position(|&u| u == usage)
+}
+
 /// Apex Pro TKL 2023 implementation.
 pub struct ApexProTkl2023 {
     inner: GenericKeyboard,
@@ -62,10 +115,30 @@ impl ApexProTkl2023 {
     }
 
     /// Whether this device uses the new 2023 per-key direct protocol.
-    /// The 2023 wired model (`0x1628`) is excluded: it keeps its own path behind
-    /// the `experimental-apex-2023` feature flag.
     fn uses_new_protocol(&self) -> bool {
         self.direct_packet_id().is_some()
+    }
+
+    /// The wired 2023 model (`0x1628`) uses GG's own key table and frame size, and its 0x4B init
+    /// was not seen in the capture.
+    fn is_wired_2023(&self) -> bool {
+        self.inner.info().product_id == product_ids::APEX_PRO_TKL_2023
+    }
+
+    fn direct_keys(&self) -> &'static [u8] {
+        if self.is_wired_2023() {
+            WIRED_2023_KEYS
+        } else {
+            TKL_KEYS
+        }
+    }
+
+    fn direct_packet_length(&self) -> usize {
+        if self.is_wired_2023() {
+            WIRED_2023_PACKET_LENGTH
+        } else {
+            APEX_2023_PACKET_LENGTH
+        }
     }
 
     /// Whether this is a wireless variant.
@@ -91,14 +164,14 @@ impl ApexProTkl2023 {
             | product_ids::APEX_PRO_TKL_2023_WIRELESS_2
             | product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE
             | product_ids::APEX_PRO_TKL_WIRELESS_2024 => APEX_2023_PACKET_ID_DIRECT_WIRELESS,
-            product_ids::APEX_PRO_TKL_2024 => APEX_2023_PACKET_ID_DIRECT_WIRED,
+            product_ids::APEX_PRO_TKL_2024 | product_ids::APEX_PRO_TKL_2023 => APEX_2023_PACKET_ID_DIRECT_WIRED,
             _ => return None,
         })
     }
 
     /// Send the 0x4B initialization feature report required by new protocol.
     fn ensure_new_protocol_init(&mut self) -> Result<()> {
-        if self.initialized_new_protocol {
+        if self.initialized_new_protocol || self.is_wired_2023() {
             return Ok(());
         }
         let mut buf = vec![0u8; APEX_2023_PACKET_LENGTH];
@@ -118,13 +191,14 @@ impl ApexProTkl2023 {
 
         let packet_id = self.direct_packet_id().unwrap_or(APEX_2023_PACKET_ID_DIRECT_WIRED);
 
-        let num_keys = TKL_KEYS.len();
-        let mut buf = vec![0u8; APEX_2023_PACKET_LENGTH];
+        let keys = self.direct_keys();
+        let packet_length = self.direct_packet_length();
+        let mut buf = vec![0u8; packet_length];
         buf[0] = 0x00; // Report ID
         buf[1] = packet_id;
-        buf[2] = num_keys as u8;
+        buf[2] = keys.len() as u8;
 
-        for (i, &hid_code) in TKL_KEYS.iter().enumerate() {
+        for (i, &hid_code) in keys.iter().enumerate() {
             let offset = 3 + i * 4;
             buf[offset] = hid_code;
             buf[offset + 1] = color.r;
@@ -132,7 +206,7 @@ impl ApexProTkl2023 {
             buf[offset + 3] = color.b;
         }
 
-        self.inner.send_feature(&buf, APEX_2023_PACKET_LENGTH)
+        self.inner.send_feature(&buf, packet_length)
     }
 
     /// Set actuation point for all keys (global).
@@ -457,10 +531,75 @@ mod tests {
     }
 
     #[test]
-    fn wired_2023_keeps_its_own_path() {
+    fn wired_2023_uses_the_gg_captured_layout() {
+        // [EXPERIMENTAL] layout read from a GG USBPcap capture, not yet confirmed on hardware.
         let keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2023);
-        assert!(!keyboard.uses_new_protocol());
-        assert_eq!(keyboard.direct_packet_id(), None);
+        assert!(keyboard.uses_new_protocol());
+        assert_eq!(keyboard.direct_packet_id(), Some(APEX_2023_PACKET_ID_DIRECT_WIRED));
+        assert_eq!(keyboard.direct_keys().len(), 84);
+        assert_eq!(keyboard.direct_packet_length(), 645);
+        assert!(3 + keyboard.direct_keys().len() * 4 <= WIRED_2023_PACKET_LENGTH);
+    }
+
+    #[test]
+    fn wired_2023_key_table_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(WIRED_2023_KEYS.iter().all(|k| seen.insert(*k)));
+    }
+
+    #[test]
+    fn profile_slots_cover_exactly_ggs_analog_keys() {
+        // `hall_thresholds.keys[].hid` from GG's stored config for this model, sorted by HID.
+        let mut gg_analog_keys: Vec<u8> = (0x04..=0x39).filter(|&u| u != 0x29).collect();
+        gg_analog_keys.extend([
+            0x64, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xF0,
+        ]);
+        let mut slots = WIRED_2023_PROFILE_SLOTS.to_vec();
+        slots.sort_unstable();
+        assert_eq!(slots, gg_analog_keys);
+    }
+
+    #[test]
+    fn profile_slots_match_captured_single_key_edits() {
+        let captured = [
+            (0x1E, 1),  // 1
+            (0x1A, 16), // W
+            (0x13, 24), // P
+            (0x31, 27), // backslash
+            (0x04, 29), // A
+            (0x0F, 37), // L
+            (0x28, 41), // Enter
+            (0xE1, 42), // LShift
+            (0x1D, 44), // Z
+            (0x38, 53), // slash
+            (0xE5, 55), // RShift
+            (0xE0, 56), // LCtrl
+            (0xE3, 57), // LGui
+            (0xE2, 58), // LAlt
+            (0x2C, 60), // Space
+            (0xE6, 63), // RAlt
+            (0xE7, 64), // RGui / Menu
+            (0xF0, 65), // Fn
+            (0xE4, 66), // RCtrl
+            (0x2A, 67), // Backspace
+        ];
+        for (usage, slot) in captured {
+            assert_eq!(profile_slot(usage), Some(slot), "usage {usage:#04x}");
+        }
+    }
+
+    #[test]
+    fn keys_without_analog_switches_have_no_profile_slot() {
+        assert_eq!(profile_slot(0x29), None); // Esc
+        assert_eq!(profile_slot(0x3A), None); // F1
+        assert_eq!(profile_slot(0x4F), None); // Right arrow
+    }
+
+    #[test]
+    fn gen3_keeps_the_112_key_table() {
+        let keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2024);
+        assert_eq!(keyboard.direct_keys().len(), 112);
+        assert_eq!(keyboard.direct_packet_length(), APEX_2023_PACKET_LENGTH);
     }
 
     #[test]

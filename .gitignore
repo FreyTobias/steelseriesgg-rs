@@ -15,6 +15,7 @@ tmp/
 .vscode/settings.json
 .summary_files/
 .claude/settings.local.json
+.claude/context-archive/
 .claude-dev-helper/
 .pair-programming-session.md
 .planning/

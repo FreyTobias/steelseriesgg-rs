@@ -109,7 +109,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         include_hid_logs: bool,
 
-        /// Include performance metrics snapshot (if daemon is running)
+        /// Include performance metrics snapshot (not available yet: needs the daemon, currently omitted with a warning)
         #[arg(long)]
         include_performance: bool,
     },

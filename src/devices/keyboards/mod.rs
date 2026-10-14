@@ -399,8 +399,14 @@ impl GenericKeyboard {
     /// Resolves the correct hidraw path for the control interface (interface 3 for wireless).
     #[cfg(unix)]
     pub fn send_feature(&self, data: &[u8], report_len: usize) -> Result<()> {
-        let path = super::find_hidraw_for_interface(self.info.vendor_id, self.info.product_id, 3)
-            .unwrap_or_else(|| self.info.path.clone());
+        // The wired 2023 model takes feature reports on USB interface 1, the control collection
+        // discovery already selected; interface 3 is the wireless layout.
+        let path = if self.info.product_id == crate::devices::product_ids::APEX_PRO_TKL_2023 {
+            self.info.path.clone()
+        } else {
+            super::find_hidraw_for_interface(self.info.vendor_id, self.info.product_id, 3)
+                .unwrap_or_else(|| self.info.path.clone())
+        };
         super::send_feature_report_raw(&path, data, report_len)
     }
 
@@ -548,8 +554,7 @@ impl Keyboard for GenericKeyboard {
         let apply_command = ApplyCommand;
         let mut buffer = [0u8; 65];
         let size = self.report_builder.build_report(apply_command, &mut buffer)?;
-        let _ = self.send_report_async(&buffer[..size]).await;
-        Ok(())
+        self.send_report_async(&buffer[..size]).await
     }
 
     // === Per-Key RGB Control Implementation ===

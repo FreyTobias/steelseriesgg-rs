@@ -66,7 +66,7 @@ async fn cmd_bug_report(output: &str, include_hid_logs: bool, include_performanc
     }
 
     if include_performance {
-        println!("  - Performance metrics snapshot");
+        println!("  - Performance metrics snapshot: NOT AVAILABLE yet (needs the daemon); will be omitted");
     }
 
     println!();
@@ -257,6 +257,31 @@ fn cmd_devices(manager: &DeviceManager) -> Result<()> {
     Ok(())
 }
 
+/// SteelSeries GG's engine rewrites the whole keyboard about 19 times a second, so any one-shot
+/// colour sent while it runs is replaced within a frame or two.
+#[cfg(windows)]
+fn warn_if_gg_engine_running() {
+    use sysinfo::{ProcessesToUpdate, System};
+
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    if sys
+        .processes_by_name(std::ffi::OsStr::new("SteelSeriesEngine.exe"))
+        .next()
+        .is_some()
+    {
+        eprintln!(
+            "{}",
+            "Warning: SteelSeries GG is running and keeps overwriting the keyboard lighting. \
+             Close GG (including its tray icon) for this colour to stay."
+                .yellow()
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn warn_if_gg_engine_running() {}
+
 async fn cmd_rgb(manager: &DeviceManager, action: RgbAction) -> Result<()> {
     // Find the first keyboard
     let keyboard_info = manager
@@ -264,6 +289,7 @@ async fn cmd_rgb(manager: &DeviceManager, action: RgbAction) -> Result<()> {
         .ok_or_else(|| Error::Other("No keyboard found".to_string()))?;
 
     println!("Using keyboard: {}", keyboard_info.name);
+    warn_if_gg_engine_running();
 
     // Open device state store for persistence
     let state_store = DeviceStateStore::new_async().await?;
@@ -1295,14 +1321,17 @@ async fn cmd_performance(manager: &DeviceManager, action: PerformanceAction) -> 
 
                         let device_start = Instant::now();
                         let mut operation_count = 0;
+                        let mut failed_count = 0;
 
                         let colors = [Color::RED, Color::GREEN, Color::BLUE, Color::WHITE, Color::BLACK];
 
                         // Run rapid RGB operations for benchmark duration
                         while device_start.elapsed().as_secs() < duration {
                             for color in colors {
-                                let _ = keyboard.set_color(color).await;
-                                operation_count += 1;
+                                match keyboard.set_color(color).await {
+                                    Ok(()) => operation_count += 1,
+                                    Err(_) => failed_count += 1,
+                                }
 
                                 // Small delay to prevent overwhelming the device
                                 yield_now().await;
@@ -1313,6 +1342,9 @@ async fn cmd_performance(manager: &DeviceManager, action: PerformanceAction) -> 
                         benchmark_results.insert(device_info.name.to_string(), ops_per_second);
 
                         println!("      Operations/second: {:.1}", ops_per_second);
+                        if failed_count > 0 {
+                            println!("      Failed operations (excluded): {}", failed_count);
+                        }
 
                         // Display performance stats if available
                         if let Some(stats) = keyboard.get_rgb_performance_stats() {

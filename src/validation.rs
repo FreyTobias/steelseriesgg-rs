@@ -4,8 +4,6 @@
 //! - RGB effect validation
 //! - Hardware communication testing
 //! - Performance benchmarking
-//! - Resource monitoring and leak detection
-//! - Memory usage tracking and stability analysis
 //! - Fallback system validation
 //! - Per-key and zone-based RGB testing
 
@@ -16,11 +14,10 @@ use crate::rgb::{Color, Effect, EffectEngine, PerKeyEffect};
 
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::debug;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-/// Memory usage sample containing key system metrics.
+/// Process memory sample read from `/proc/self` (Linux only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySample {
     /// Timestamp when the sample was taken
@@ -29,419 +26,54 @@ pub struct MemorySample {
     pub rss_kb: u64,
     /// Virtual Memory Size (VmSize) in KB
     pub vm_size_kb: u64,
-    /// Heap usage in KB (approximate)
-    pub heap_kb: u64,
     /// Number of open file descriptors
     pub fd_count: u32,
-    /// CPU usage percentage (0-100)
-    pub cpu_percent: f64,
 }
 
 impl MemorySample {
     /// Create a new memory sample by reading current system state.
+    ///
+    /// Fails if `/proc/self` cannot be read or parsed, and on non-Linux platforms.
+    #[cfg(target_os = "linux")]
     pub async fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
-        // Perform all synchronous /proc file reads in a single blocking task
-        // to minimize blocking the async executor and reduce spawn overhead
-        let (status_content, fd_count, stat_content) =
-            tokio::task::spawn_blocking(|| -> Result<(String, u32, String), std::io::Error> {
-                let status = std::fs::read_to_string("/proc/self/status")?;
-                let fds = std::fs::read_dir("/proc/self/fd")
-                    .map(|entries| entries.count() as u32)
-                    .unwrap_or(0);
-                let stat = std::fs::read_to_string("/proc/self/stat")?;
-                Ok((status, fds, stat))
-            })
-            .await??;
-
-        let mut rss_kb: u64 = 0;
-        let mut vm_size_kb: u64 = 0;
-
-        for line in status_content.lines() {
-            if line.starts_with("VmRSS:") {
-                rss_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            } else if line.starts_with("VmSize:") {
-                vm_size_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            }
-        }
-
-        let cpu_percent = Self::parse_cpu_usage(&stat_content).unwrap_or(0.0);
-
-        let heap_kb = rss_kb.saturating_sub(4096);
+        // One blocking task for all /proc reads to avoid stalling the async executor
+        let (status_content, fd_count) = tokio::task::spawn_blocking(|| -> Result<(String, u32), std::io::Error> {
+            let status = std::fs::read_to_string("/proc/self/status")?;
+            let fds = std::fs::read_dir("/proc/self/fd")?.count() as u32;
+            Ok((status, fds))
+        })
+        .await??;
 
         Ok(MemorySample {
             timestamp,
-            rss_kb,
-            vm_size_kb,
-            heap_kb,
+            rss_kb: Self::status_kb(&status_content, "VmRSS:")?,
+            vm_size_kb: Self::status_kb(&status_content, "VmSize:")?,
             fd_count,
-            cpu_percent,
         })
     }
 
-    /// Parse CPU usage from /proc/self/stat content.
-    fn parse_cpu_usage(stat_content: &str) -> Option<f64> {
-        let fields: Vec<&str> = stat_content.split_whitespace().collect();
-        if fields.len() > 15 {
-            let utime: u64 = fields[13].parse().ok()?;
-            let stime: u64 = fields[14].parse().ok()?;
-            let total_time = utime + stime;
-
-            // Convert clock ticks to CPU percentage (rough approximation)
-            // This is simplified - in practice you'd need to track deltas over time
-            Some((total_time as f64) / 100.0) // Very rough approximation
-        } else {
-            None
-        }
-    }
-}
-
-/// Memory tracker with sliding window analysis for leak detection.
-pub struct MemoryTracker {
-    /// Sliding window of memory samples
-    samples: VecDeque<MemorySample>,
-    /// Maximum number of samples to keep
-    max_samples: usize,
-    /// Baseline memory usage
-    baseline_rss: Option<u64>,
-}
-
-impl MemoryTracker {
-    /// Create a new memory tracker with specified window size.
-    pub fn new(window_size: usize) -> Self {
-        Self {
-            samples: VecDeque::with_capacity(window_size),
-            max_samples: window_size,
-            baseline_rss: None,
-        }
+    /// Memory sampling reads `/proc/self`, which only exists on Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub async fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Err("memory sampling reads /proc/self and is only supported on Linux".into())
     }
 
-    /// Add a new memory sample.
-    pub async fn add_sample(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let sample = MemorySample::new().await?;
-
-        // Set baseline on first sample
-        if self.baseline_rss.is_none() {
-            self.baseline_rss = Some(sample.rss_kb);
-            debug!("Memory tracking baseline set: {} KB RSS", sample.rss_kb);
-        }
-
-        // Maintain sliding window
-        if self.samples.len() >= self.max_samples {
-            self.samples.pop_front();
-        }
-
-        self.samples.push_back(sample);
-        Ok(())
+    /// Extract a `<key> <value> kB` field from `/proc/self/status`; a missing or malformed field is an error.
+    #[cfg(target_os = "linux")]
+    fn status_kb(status: &str, key: &str) -> Result<u64, String> {
+        let line = status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .ok_or_else(|| format!("{key} missing from /proc/self/status"))?;
+        line.split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| format!("unparseable {key} line in /proc/self/status: {line:?}"))
     }
-
-    /// Analyze memory stability and detect potential leaks.
-    pub fn analyze_stability(&self) -> MemoryAnalysis {
-        if self.samples.len() < 3 {
-            return MemoryAnalysis {
-                is_stable: false,
-                trend: MemoryTrend::Unknown,
-                leak_detected: false,
-                current_rss_kb: 0,
-                peak_rss_kb: 0,
-                growth_rate_kb_per_sec: 0.0,
-                warning_message: Some("Insufficient samples for analysis".to_string()),
-            };
-        }
-
-        let (current_sample, first_sample) = match (self.samples.back(), self.samples.front()) {
-            (Some(current), Some(first)) => (current, first),
-            _ => {
-                return MemoryAnalysis {
-                    is_stable: false,
-                    trend: MemoryTrend::Unknown,
-                    leak_detected: false,
-                    current_rss_kb: 0,
-                    peak_rss_kb: 0,
-                    growth_rate_kb_per_sec: 0.0,
-                    warning_message: Some("Insufficient samples for analysis".to_string()),
-                };
-            }
-        };
-
-        let time_span = current_sample.timestamp.saturating_sub(first_sample.timestamp);
-        let time_span_sec = time_span.as_secs_f64();
-
-        let growth = current_sample.rss_kb as i64 - first_sample.rss_kb as i64;
-        let growth_rate = if time_span_sec > 0.0 {
-            growth as f64 / time_span_sec
-        } else {
-            0.0
-        };
-
-        // Calculate peak memory
-        let peak_rss_kb = self.samples.iter().map(|s| s.rss_kb).max().unwrap_or(0);
-
-        // Detect trend using linear regression on last 10 samples
-        let trend = self.detect_trend();
-
-        // Leak detection: consistent growth over 30% of baseline for more than 10 samples
-        let leak_detected = if let Some(baseline) = self.baseline_rss {
-            let current_growth_percent = (current_sample.rss_kb as f64 - baseline as f64) / baseline as f64 * 100.0;
-            current_growth_percent > 30.0 && self.samples.len() >= 10 && matches!(trend, MemoryTrend::Increasing)
-        } else {
-            false
-        };
-
-        // Stability: growth rate less than 1KB/sec and no sustained increase
-        let is_stable = growth_rate.abs() < 1.0 && !matches!(trend, MemoryTrend::Increasing);
-
-        let warning_message = if leak_detected {
-            Some("Potential memory leak detected - RSS increasing consistently".to_string())
-        } else if growth_rate > 10.0 {
-            Some(format!("High memory growth rate: {:.1} KB/sec", growth_rate))
-        } else {
-            None
-        };
-
-        MemoryAnalysis {
-            is_stable,
-            trend,
-            leak_detected,
-            current_rss_kb: current_sample.rss_kb,
-            peak_rss_kb,
-            growth_rate_kb_per_sec: growth_rate,
-            warning_message,
-        }
-    }
-
-    /// Detect memory usage trend using linear regression.
-    fn detect_trend(&self) -> MemoryTrend {
-        if self.samples.len() < 3 {
-            return MemoryTrend::Unknown;
-        }
-
-        // Use last 10 samples or all available samples
-        let sample_count = self.samples.len().min(10);
-        let recent_samples: Vec<_> = self.samples.iter().rev().take(sample_count).collect();
-
-        // Simple linear regression slope calculation
-        let n = recent_samples.len() as f64;
-        let sum_x: f64 = (0..recent_samples.len()).map(|i| i as f64).sum();
-        let sum_y: f64 = recent_samples.iter().map(|s| s.rss_kb as f64).sum();
-        let sum_xy: f64 = recent_samples
-            .iter()
-            .enumerate()
-            .map(|(i, s)| i as f64 * s.rss_kb as f64)
-            .sum();
-        let sum_xx: f64 = (0..recent_samples.len()).map(|i| (i as f64).powi(2)).sum();
-
-        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x.powi(2));
-
-        if slope > 0.5 {
-            MemoryTrend::Increasing
-        } else if slope < -0.5 {
-            MemoryTrend::Decreasing
-        } else {
-            MemoryTrend::Stable
-        }
-    }
-
-    /// Get the latest memory sample.
-    pub fn latest_sample(&self) -> Option<&MemorySample> {
-        self.samples.back()
-    }
-
-    /// Get all samples in the tracking window.
-    pub fn get_samples(&self) -> &VecDeque<MemorySample> {
-        &self.samples
-    }
-}
-
-/// Memory analysis result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryAnalysis {
-    /// Whether memory usage is stable
-    pub is_stable: bool,
-    /// Memory usage trend
-    pub trend: MemoryTrend,
-    /// Whether a memory leak was detected
-    pub leak_detected: bool,
-    /// Current RSS usage in KB
-    pub current_rss_kb: u64,
-    /// Peak RSS usage in KB
-    pub peak_rss_kb: u64,
-    /// Memory growth rate in KB/second
-    pub growth_rate_kb_per_sec: f64,
-    /// Warning message if any issues detected
-    pub warning_message: Option<String>,
-}
-
-/// Memory usage trend.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum MemoryTrend {
-    Increasing,
-    Decreasing,
-    Stable,
-    Unknown,
-}
-
-/// Resource validator for comprehensive system monitoring.
-pub struct ResourceValidator {
-    /// Memory tracker for leak detection
-    memory_tracker: MemoryTracker,
-    /// CPU usage baseline measurements
-    cpu_baseline: Option<f64>,
-    /// HID communication timing measurements
-    hid_timings: VecDeque<Duration>,
-    /// Maximum timing samples to keep
-    max_timing_samples: usize,
-}
-
-impl ResourceValidator {
-    /// Create a new resource validator.
-    pub fn new() -> Self {
-        Self {
-            memory_tracker: MemoryTracker::new(50), // 50 sample sliding window
-            cpu_baseline: None,
-            hid_timings: VecDeque::new(),
-            max_timing_samples: 100,
-        }
-    }
-
-    /// Start baseline measurement period.
-    pub async fn start_baseline_measurement(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        debug!("Starting resource baseline measurement");
-
-        // Take initial memory sample
-        self.memory_tracker.add_sample().await?;
-
-        // Set CPU baseline (would be improved with actual CPU monitoring)
-        let sample = MemorySample::new().await?;
-        self.cpu_baseline = Some(sample.cpu_percent);
-
-        Ok(())
-    }
-
-    /// Add a memory usage sample.
-    pub async fn track_memory_usage(&mut self) -> Result<MemoryAnalysis, Box<dyn std::error::Error + Send + Sync>> {
-        self.memory_tracker.add_sample().await?;
-        Ok(self.memory_tracker.analyze_stability())
-    }
-
-    /// Record HID communication timing.
-    pub fn record_hid_timing(&mut self, duration: Duration) {
-        if self.hid_timings.len() >= self.max_timing_samples {
-            self.hid_timings.pop_front();
-        }
-        self.hid_timings.push_back(duration);
-    }
-
-    /// Validate memory stability over the tracking period.
-    pub fn validate_memory_stability(&self) -> ValidationResult {
-        let analysis = self.memory_tracker.analyze_stability();
-
-        let start = Instant::now();
-        let test_name = "Memory Stability Validation".to_string();
-
-        if analysis.leak_detected {
-            ValidationResult::failure(
-                test_name,
-                start.elapsed(),
-                format!(
-                    "Memory leak detected: {} KB current, {:.2} KB/sec growth",
-                    analysis.current_rss_kb, analysis.growth_rate_kb_per_sec
-                ),
-            )
-            .with_metric("current_rss_kb", analysis.current_rss_kb as f64)
-            .with_metric("growth_rate_kb_per_sec", analysis.growth_rate_kb_per_sec)
-            .with_metric("peak_rss_kb", analysis.peak_rss_kb as f64)
-        } else if !analysis.is_stable {
-            ValidationResult::failure(
-                test_name,
-                start.elapsed(),
-                analysis
-                    .warning_message
-                    .unwrap_or_else(|| "Memory usage unstable".to_string()),
-            )
-            .with_metric("current_rss_kb", analysis.current_rss_kb as f64)
-            .with_metric("growth_rate_kb_per_sec", analysis.growth_rate_kb_per_sec)
-        } else {
-            ValidationResult::success(test_name, start.elapsed())
-                .with_metric("current_rss_kb", analysis.current_rss_kb as f64)
-                .with_metric("growth_rate_kb_per_sec", analysis.growth_rate_kb_per_sec)
-                .with_metric("peak_rss_kb", analysis.peak_rss_kb as f64)
-                .with_note("Memory usage is stable")
-        }
-    }
-
-    /// Calculate HID communication efficiency metrics.
-    pub fn analyze_hid_performance(&self) -> HidPerformanceAnalysis {
-        if self.hid_timings.is_empty() {
-            return HidPerformanceAnalysis {
-                average_latency_ms: 0.0,
-                max_latency_ms: 0.0,
-                efficiency_score: 0.0,
-                cpu_reduction_percent: 0.0,
-            };
-        }
-
-        let timings: Vec<f64> = self
-            .hid_timings
-            .iter()
-            .map(|d| d.as_secs_f64() * 1000.0) // Convert to milliseconds
-            .collect();
-
-        let average_latency_ms = timings.iter().sum::<f64>() / timings.len() as f64;
-        let max_latency_ms = timings.iter().fold(0.0f64, |a, &b| a.max(b));
-
-        // Efficiency score based on latency (lower is better)
-        // Target: < 5ms average, < 20ms max for good efficiency
-        let efficiency_score = if average_latency_ms < 5.0 && max_latency_ms < 20.0 {
-            100.0
-        } else if average_latency_ms < 10.0 && max_latency_ms < 50.0 {
-            80.0
-        } else if average_latency_ms < 20.0 && max_latency_ms < 100.0 {
-            60.0
-        } else {
-            40.0
-        };
-
-        // Estimate CPU reduction (simplified calculation)
-        let baseline_latency = 10.0; // Assume 10ms baseline
-        let cpu_reduction_percent = if average_latency_ms < baseline_latency {
-            ((baseline_latency - average_latency_ms) / baseline_latency * 100.0).min(20.0)
-        } else {
-            0.0
-        };
-
-        HidPerformanceAnalysis {
-            average_latency_ms,
-            max_latency_ms,
-            efficiency_score,
-            cpu_reduction_percent,
-        }
-    }
-
-    /// Get current memory usage.
-    pub fn current_memory_usage(&self) -> Option<u64> {
-        self.memory_tracker.latest_sample().map(|s| s.rss_kb)
-    }
-}
-
-impl Default for ResourceValidator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// HID communication performance analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HidPerformanceAnalysis {
-    /// Average HID communication latency in milliseconds
-    pub average_latency_ms: f64,
-    /// Maximum observed latency in milliseconds
-    pub max_latency_ms: f64,
-    /// Efficiency score (0-100, higher is better)
-    pub efficiency_score: f64,
-    /// Estimated CPU usage reduction percentage
-    pub cpu_reduction_percent: f64,
 }
 
 /// Validation result for a single test.

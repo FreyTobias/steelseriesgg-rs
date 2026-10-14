@@ -1,5 +1,5 @@
-// Integration test to verify device readback capabilities
-// This helps determine if the device acknowledges RGB commands
+// Hardware probe (not a test): needs a connected SteelSeries keyboard.
+// Run with `cargo run --example device_readback` to check whether the device acknowledges RGB commands.
 
 use steelseries_gg::devices::{DeviceManager, DeviceType};
 use steelseries_gg::rgb::Color;

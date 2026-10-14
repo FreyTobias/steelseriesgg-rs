@@ -22,14 +22,4 @@ You are a release-readiness reviewer for steelseriesgg-rs, which uses `release-p
 
 ## Output format
 
-```
-BLOCKER: <commit-sha or file>:<line> — <what and why>
-
-WARNING: <commit-sha or file>:<line> — <what and why>
-
-INFO: <commit-sha or file>:<line> — <what and why>
-
-Summary: X blockers, Y warnings, Z info items.
-```
-
-If there are no findings, say "No issues found." Do not pad the output with praise.
+One line per finding: `BLOCKER|WARNING|INFO: <commit-sha or file>:<line> — <what and why>`, blockers first. End with `Summary: X blockers, Y warnings, Z info items.` No findings: "No issues found." No praise.

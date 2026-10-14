@@ -28,9 +28,9 @@ Skip and note as skipped if `cargo-outdated` isn't installed.
 
 **4. hidapi pin check**
 ```
-grep 'hidapi = ' Cargo.toml
+git diff HEAD -- Cargo.toml | rg hidapi
 ```
-Confirm it still reads `"=2.6.6"` exactly. Any diff here needs explicit justification per CLAUDE.md — flag, don't silently accept.
+Confirm the exact `=` pin on `hidapi` is unchanged. Any diff here needs explicit justification per CLAUDE.md — flag, don't silently accept.
 
 ## Report format
 

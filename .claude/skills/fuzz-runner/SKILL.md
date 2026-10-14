@@ -5,11 +5,11 @@ user-invocable: true
 disable-model-invocation: true
 ---
 
-Run `src/devices/fuzz.rs` (`Commands::Fuzz` in `src/main.rs`, hidden from `--help`) against real hardware. This sends arbitrary command bytes to a physical device — it can brick it or cause unexpected behavior. Only run this when the user explicitly asks to fuzz a device.
+Run `src/devices/fuzz.rs` (`Commands::Fuzz` in `src/cli.rs`, hidden from `--help`) against real hardware. This sends arbitrary command bytes to a physical device — it can brick it or cause unexpected behavior. Only run this when the user explicitly asks to fuzz a device.
 
 ## Before running
 
-1. Confirm a real keyboard is attached: `ssgg list` (or equivalent device-discovery command) and confirm the user is aware this targets that specific device.
+1. Confirm a real keyboard is attached: `ssgg devices` and confirm the user is aware this targets that specific device.
 2. Ask the user to confirm the command byte range — do not default to the full `0x00..0xFF` sweep unless they ask for it. Narrower ranges (e.g. probing around a known command like `0x2D` ActuationControl) are safer and faster to interpret.
 3. Check battery/USB power is stable — fuzzing mid-firmware-update or on a device with a shaky connection risks a bad flash state.
 

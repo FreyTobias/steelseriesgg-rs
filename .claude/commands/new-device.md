@@ -10,14 +10,14 @@ Scaffold a new device for steelseriesgg-rs. Ask the user for:
 Then create the following, using existing devices as templates:
 
 **For a keyboard:**
-- `src/devices/keyboards/<snake_case_name>.rs` — implement the `KeyboardDevice` trait
+- `src/devices/keyboards/<snake_case_name>.rs` — implement the `Keyboard` trait (and its `Device` supertrait)
   - Stub all methods, mark protocol work `[EXPERIMENTAL]` or `[PLACEHOLDER]`
   - Use `HidReportBuilder` for all HID output — never raw bytes
 - Register in `src/devices/keyboards/mod.rs` under the VID/PID
 - Add to the device table in `src/devices/discovery.rs`
 
 **For a headset:**
-- `src/devices/headsets/<snake_case_name>.rs` — implement the `HeadsetDevice` trait
+- `src/devices/headsets/<snake_case_name>.rs` — implement the `Headset` trait (and its `Device` supertrait)
 - Register in `src/devices/headsets/mod.rs`
 - Add to `src/devices/discovery.rs`
 

@@ -1155,4 +1155,28 @@ mod tests {
         assert_eq!(entry.connection_count, 2);
         assert!(entry.last_seen > after_update);
     }
+
+    #[test]
+    fn open_keyboard_rejects_non_keyboard_device() {
+        // HidApi init can fail on hosts without HID access; the type check is what is under test.
+        let Ok(manager) = DeviceManager::new() else { return };
+        let mut info = create_test_device_info(None);
+        info.device_type = DeviceType::Headset;
+
+        assert!(matches!(
+            manager.open_keyboard(&info),
+            Err(Error::DeviceCommunication(msg)) if msg.contains("not a keyboard")
+        ));
+    }
+
+    #[test]
+    fn open_headset_rejects_non_headset_device() {
+        let Ok(manager) = DeviceManager::new() else { return };
+        let info = create_test_device_info(None);
+
+        assert!(matches!(
+            manager.open_headset(&info),
+            Err(Error::DeviceCommunication(msg)) if msg.contains("not a headset")
+        ));
+    }
 }

@@ -14,13 +14,7 @@ user-invocable: false
 
 ## Command code status
 
-| Code | Constant | Status |
-|------|----------|--------|
-| `0x23` | `CommandCode::PerKeyRgb` | Placeholder — actual per-key command unknown |
-| `0x40` | `CommandCode::Apex2023Direct` | Experimental — unverified on hardware |
-| `0x2D` | `CommandCode::ActuationControl` | Experimental — firmware command unknown |
-
-Any new protocol work must be labeled with its verification status. Never present experimental code as confirmed.
+See `.claude/rules/experimental-protocol.md` (the single source). Any new protocol work must be labeled with its verification status; never present experimental code as confirmed.
 
 ## Pre-edit checklist
 

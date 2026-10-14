@@ -147,7 +147,6 @@ impl ProfileManager {
 
     /// Create a test profile manager with a specific directory.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn with_dir(dir: PathBuf) -> Self {
         Self {
             profiles: HashMap::new(),

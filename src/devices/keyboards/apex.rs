@@ -2,6 +2,7 @@
 
 use super::{GenericKeyboard, Keyboard};
 use crate::Result;
+use crate::devices::hid_reports::Apex8ZoneBrightnessCommand;
 use crate::devices::key_mapping::{KeyAddress, KeyId, KeyMapping};
 use crate::devices::zone_mapping::{ZoneEffect, ZoneMapping};
 use crate::devices::{Device, DeviceInfo, DeviceType};
@@ -14,72 +15,15 @@ pub struct Apex3Tkl {
 }
 
 impl Apex3Tkl {
-    /// Zone count for Apex 3 TKL (10-zone RGB).
-    pub const ZONE_COUNT: usize = 9;
+    /// Zone count for Apex 3 TKL (8 zones, as advertised and as modelled by OpenRGB).
+    pub const ZONE_COUNT: usize = 8;
 
     /// Product ID for Apex 3 TKL.
     pub const PRODUCT_ID: u16 = 0x1622;
 
-    /// HID command: RGB effect control
-    pub const CMD_RGB_EFFECT: u8 = 0x23;
-
-    /// HID command: OSD navigation
-    pub const CMD_OSD_NAV: u8 = 0x24;
-
     /// Create from a generic keyboard.
     pub fn new(keyboard: GenericKeyboard) -> Self {
         Self { inner: keyboard }
-    }
-
-    /// Set reactive lighting mode.
-    pub fn set_reactive_mode(&mut self, enabled: bool) -> Result<()> {
-        let data = if enabled {
-            [0x25, 0x01] // Enable reactive
-        } else {
-            [0x25, 0x00] // Disable reactive
-        };
-        self.inner.send_raw(&data)
-    }
-
-    /// Set color shift effect.
-    pub fn set_color_shift(&mut self, color1: Color, color2: Color, speed: u8) -> Result<()> {
-        let data = [
-            0x26, // Color shift command
-            color1.r,
-            color1.g,
-            color1.b,
-            color2.r,
-            color2.g,
-            color2.b,
-            speed.min(100),
-        ];
-        self.inner.send_raw(&data)
-    }
-
-    /// Experimental: RGB effect control - hardware behavior not fully verified.
-    #[doc = "Experimental: Hardware behavior not fully verified"]
-    pub fn set_rgb_effect(&mut self, effect_id: u8, params: &[u8]) -> Result<()> {
-        let mut data = vec![0u8; 65];
-        data[0] = 0x00; // Report ID
-        data[1] = Self::CMD_RGB_EFFECT;
-        data[2] = effect_id;
-
-        // Copy parameters into the report
-        for (i, &param) in params.iter().enumerate() {
-            if i + 3 >= 65 {
-                break; // Prevent buffer overflow
-            }
-            data[i + 3] = param;
-        }
-
-        self.inner.send_raw(&data)
-    }
-
-    /// Experimental: OSD navigation command - hardware behavior not fully verified.
-    #[doc = "Experimental: Hardware behavior not fully verified"]
-    pub fn send_osd_command(&mut self, command: u8) -> Result<()> {
-        let data = [0x00, Self::CMD_OSD_NAV, command];
-        self.inner.send_raw(&data)
     }
 }
 
@@ -128,12 +72,30 @@ crate::impl_keyboard_with_delegation!(Apex3Tkl, {
         self.inner.set_zone_colors(colors).await
     }
 
+    async fn set_brightness(&mut self, brightness: u8) -> Result<()> {
+        self.inner
+            .send_command_async(Apex8ZoneBrightnessCommand::from_percent(brightness))
+            .await
+    }
+
     async fn set_key_color(&mut self, key_id: KeyId, color: Color) -> Result<()> {
         self.inner.set_key_color(key_id, color).await
     }
 
     async fn set_key_colors(&mut self, key_colors: &[(KeyId, Color)]) -> Result<()> {
         self.inner.set_key_colors(key_colors).await
+    }
+
+    async fn set_key_color_direct(&mut self, address: KeyAddress, color: Color) -> Result<()> {
+        self.inner.set_key_color_direct(address, color).await
+    }
+
+    async fn set_key_colors_direct(&mut self, key_colors: &[(KeyAddress, Color)]) -> Result<()> {
+        self.inner.set_key_colors_direct(key_colors).await
+    }
+
+    async fn set_key_region(&mut self, start_hid: u8, count: u8, color: Color) -> Result<()> {
+        self.inner.set_key_region(start_hid, count, color).await
     }
 
     fn read_actuation_point(&mut self) -> Result<u8> {

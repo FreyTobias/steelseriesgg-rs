@@ -309,7 +309,7 @@ impl ZoneFallback {
         apex_3.add_zone(ZonePosition::Underglow, "Underglow".to_string(), false, 10);
         self.mappings.insert(product_ids::APEX_3, apex_3);
 
-        // Apex 3 TKL - Enhanced 9-zone mapping
+        // Apex 3 TKL - 8 zones (SteelSeries spec, OpenRGB SteelSeriesApex8ZoneController)
         let mut apex_3_tkl = ZoneMapping::new(product_ids::APEX_3_TKL, "Apex 3 TKL".to_string());
         apex_3_tkl.add_zone(ZonePosition::FunctionRow, "Function Keys".to_string(), false, 13);
         apex_3_tkl.add_zone(ZonePosition::MainKeys, "Main Keys Left".to_string(), true, 18);
@@ -324,7 +324,6 @@ impl ZoneFallback {
             6,
         );
         apex_3_tkl.add_zone(ZonePosition::ArrowKeys, "Arrow Keys".to_string(), false, 4);
-        apex_3_tkl.add_zone(ZonePosition::Underglow, "Underglow".to_string(), false, 8);
         self.mappings.insert(product_ids::APEX_3_TKL, apex_3_tkl);
 
         // Generic single-zone fallback for other keyboards

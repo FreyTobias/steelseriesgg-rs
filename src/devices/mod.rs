@@ -457,6 +457,8 @@ pub mod product_ids {
     pub const APEX_PRO_MINI_2024: u16 = 0x1648;
     pub const APEX_5_2024: u16 = 0x1650;
     pub const APEX_7_2024: u16 = 0x1652;
+    // Apex M750 (issue #276, lsusb name). Detect-only: no RGB protocol known.
+    pub const APEX_M750: u16 = 0x0616;
 
     // Headsets - Arctis Series
     // Source: GG firmware registry, 2026-05-26.
@@ -494,6 +496,13 @@ pub mod product_ids {
     // Arctis Nova 3 Wireless (unverified — GG firmware names only).
     pub const ARCTIS_NOVA_3_WIRELESS_RX: u16 = 0x2267;
     pub const ARCTIS_NOVA_3_WIRELESS_TX: u16 = 0x2269;
+    // Arctis Nova 7 seen as 0x22A1 (issue #276, lsusb name; variant unknown). Detect-only.
+    pub const ARCTIS_NOVA_7_22A1: u16 = 0x22A1;
+}
+
+/// Devices registered for detection only: no protocol is known, so `ssgg` must not write to them.
+pub fn is_detect_only(product_id: u16) -> bool {
+    matches!(product_id, product_ids::APEX_M750 | product_ids::ARCTIS_NOVA_7_22A1)
 }
 
 /// Get device type from product ID.
@@ -524,7 +533,8 @@ pub fn device_type_from_product_id(product_id: u16) -> DeviceType {
         | APEX_PRO_TKL_WIRELESS_2024
         | APEX_PRO_MINI_2024
         | APEX_5_2024
-        | APEX_7_2024 => DeviceType::Keyboard,
+        | APEX_7_2024
+        | APEX_M750 => DeviceType::Keyboard,
 
         // Headsets
         ARCTIS_PRO
@@ -550,7 +560,8 @@ pub fn device_type_from_product_id(product_id: u16) -> DeviceType {
         | ARCTIS_NOVA_5_TX
         | ARCTIS_NOVA_PRO_OMNI
         | ARCTIS_NOVA_3_WIRELESS_RX
-        | ARCTIS_NOVA_3_WIRELESS_TX => DeviceType::Headset,
+        | ARCTIS_NOVA_3_WIRELESS_TX
+        | ARCTIS_NOVA_7_22A1 => DeviceType::Headset,
 
         _ => DeviceType::Unknown,
     }
@@ -583,6 +594,7 @@ pub fn device_name_from_product_id(product_id: u16) -> &'static str {
         APEX_PRO_MINI_2024 => "Apex Pro Mini (2024)",
         APEX_5_2024 => "Apex 5 (2024)",
         APEX_7_2024 => "Apex 7 (2024)",
+        APEX_M750 => "Apex M750",
         ARCTIS_PRO => "Arctis Pro",
         ARCTIS_PRO_WIRELESS => "Arctis Pro Wireless",
         ARCTIS_5 => "Arctis 5",
@@ -607,6 +619,7 @@ pub fn device_name_from_product_id(product_id: u16) -> &'static str {
         ARCTIS_NOVA_PRO_OMNI => "Arctis Nova Pro Omni",
         ARCTIS_NOVA_3_WIRELESS_RX => "Arctis Nova 3 Wireless (RX)",
         ARCTIS_NOVA_3_WIRELESS_TX => "Arctis Nova 3 Wireless (TX)",
+        ARCTIS_NOVA_7_22A1 => "Arctis Nova 7",
         _ => "Unknown SteelSeries Device",
     }
 }
@@ -618,7 +631,7 @@ pub fn zone_count_for_product_id(product_id: u16) -> usize {
 
     match product_id {
         APEX_3 => 10,
-        APEX_3_TKL => 9,
+        APEX_3_TKL => 8,
         APEX_PRO_TKL_2023 | APEX_PRO_TKL_2023_WIRELESS | APEX_PRO_TKL_2023_WIRELESS_2 => 9,
         // Zone counts for these models are unverified — 1 is a safe default until captured.
         APEX_PRO | APEX_PRO_TKL | APEX_5 | APEX_7 | APEX_7_TKL | APEX_150 => 1,
@@ -682,6 +695,18 @@ mod tests {
         // Test zone_count_for_product_id
         assert_eq!(zone_count_for_product_id(APEX_3), 10);
         assert_eq!(zone_count_for_product_id(0xFFFF), 1);
+    }
+
+    #[test]
+    fn test_issue_276_devices_are_named_and_detect_only() {
+        use product_ids::*;
+
+        assert_eq!(device_type_from_product_id(APEX_M750), DeviceType::Keyboard);
+        assert_eq!(device_name_from_product_id(APEX_M750), "Apex M750");
+        assert_eq!(device_type_from_product_id(ARCTIS_NOVA_7_22A1), DeviceType::Headset);
+        assert_eq!(device_name_from_product_id(ARCTIS_NOVA_7_22A1), "Arctis Nova 7");
+        assert!(is_detect_only(APEX_M750) && is_detect_only(ARCTIS_NOVA_7_22A1));
+        assert!(!is_detect_only(APEX_PRO_TKL_2023));
     }
 
     #[test]

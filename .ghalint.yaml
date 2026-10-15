@@ -1,0 +1,16 @@
+# SHA pinning is intentionally not used; actions float on their latest major tag.
+excludes:
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: actions/cache
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: actions/checkout
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: actions/upload-artifact
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: dtolnay/rust-toolchain
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: googleapis/release-please-action
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: peter-evans/create-pull-request
+  - policy_name: action_ref_should_be_full_length_commit_sha
+    action_name: Swatinem/rust-cache

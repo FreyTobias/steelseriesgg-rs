@@ -1,6 +1,9 @@
 # GG Database Schemas
 
-Three SQLite databases used by GG. All are locked while GG runs — copy before reading.
+Three SQLite databases used by GG, read on 2026-05-26 unless noted. All are locked while GG runs: stop
+GG and open read-only, or copy first. Field meanings for the Apex Pro TKL 2023 per-key settings were
+re-checked against controlled USB captures on 2026-10-14; where they differ, the capture note
+[apex-pro-tkl-2023-gg-capture.md](apex-pro-tkl-2023-gg-capture.md) wins.
 
 | Database | Path | Size | Purpose |
 |----------|------|------|--------|
@@ -63,31 +66,26 @@ The `settings` column holds the currently-deployed device state as JSON. Top-lev
 | `region` | `{region_id: i32}` | Layout region (-1 = US default) |
 | `meta_toggle_hid` | `{no_live_deploy: 1, code: 240}` | FN key HID code |
 | `mappings` | `{no_live_deploy: 1, button_mappings: {buttons: [...]}}` | Per-key function remaps |
-| `hall_thresholds` | `{keys: [{hid, l, h}]}` | Per-key actuation thresholds |
-| `second_actuation_thresholds` | `{keys: [{hid, l, h}]}` | Per-key rapid trigger thresholds |
+| `hall_thresholds` | `{keys: [{hid, l, h}]}` | Per-key actuation (`h`) and reset (`l`) points |
+| `second_actuation_thresholds` | `{keys: [{hid, l, h}]}` | Meaning unknown |
 | `oled_display` | `{data: [u8; 1024]}` | 128×64 1-bpp bitmap, row-major |
 | `apex_2022_oled_display_sequence` | object | OLED animation sequence |
 
-#### `hall_thresholds` — actuation hysteresis
+#### `hall_thresholds`
 
 ```json
 {"keys": [{"hid": 4, "l": 46, "h": 50}, ...]}
 ```
 
-- `hid`: USB HID Usage ID (4 = A, 240 = FN)
-- `l`: release threshold (units: ~0.04 mm each; 25 units/mm; range 0–100)
-- `h`: actuation threshold
+- `hid`: USB HID usage ID (4 = A, 240 = FN)
+- `h`: actuation point, `l`: reset point, both raw sensor values
+- The scale is non-linear. Known actuation points: 0.1 mm = 5, 1.0 mm = 21, 2.0 mm = 57, 3.0 mm = 134;
+  GG's default is `h` 21 / `l` 18 (capture note). A linear "25 units per mm" reading is wrong.
 
-**Default**: `l=46, h=50` → actuates at 2.0 mm, releases at 1.84 mm (0.16 mm hysteresis).
-**Gaming/rapid trigger**: `l=5, h=5` → actuates at 0.2 mm, near-zero hysteresis.
+#### `second_actuation_thresholds`
 
-Unit calibration: GG default is 2.0 mm and `h=50`, so 1 unit ≈ 0.04 mm (25 units/mm across 4 mm OmniPoint travel).
-
-#### `second_actuation_thresholds` — rapid trigger
-
-Same `{hid, l, h}` structure as `hall_thresholds`.
-- `l=255, h=255` → rapid trigger **disabled** for that key
-- `l=0, h=0` → rapid trigger **enabled** at minimum sensitivity
+Same `{hid, l, h}` structure as `hall_thresholds`. All zero in the 2026-10-14 config; where it lands in
+the on-board profile is unknown. It is not the Rapid Trigger switch (that is `release_mode`).
 
 #### `mappings.button_mappings.buttons[]`
 
@@ -129,31 +127,23 @@ Observed profiles for Apex Pro TKL 2023 (`device_id=242`): Default, Gaming (acti
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `rapid_tap_enable` | `{enabled: 0\|1}` | Global rapid tap on/off |
-| `rapid_tap_pairs` | object | Rapid tap key pair config |
-| `rapid_trigger_sensitivity` | `{keys: [{hid, sensitivity}]}` | Per-key sensitivity (1=normal, 2=reduced) |
-| `release_mode` | `{keys: [{hid, mode}]}` | Per-key release behavior |
+| `rapid_tap_enable` | `{enabled: 0\|1}` | Global Rapid Tap on/off |
+| `rapid_tap_pairs` | object | Rapid Tap key pairs (HID usages; default A, D) |
+| `rapid_trigger_sensitivity` | `{keys: [{hid, sensitivity}]}` | Per-key Rapid Trigger sensitivity (default 2; scale unknown) |
+| `release_mode` | `{keys: [{hid, mode}]}` | Per-key release mode |
 
-**`release_mode.mode`**:
-- `2` = standard (deactuates at `l` threshold going up)
-- `4` = instant release (Ctrl, Shift, Alt, Space, Enter — no travel-based release)
-
-Observed mode-4 keys in Gaming config: HID 40, 42, 43, 44, 57, 226, 227, 230, 231, 240.
+**`release_mode.mode`** (from the 2026-10-14 captures): `0` = off, `2` = Rapid Trigger, `3` = Key Guard.
+Mode `4` was seen on HID 40, 42, 43, 44, 57, 226, 227, 230, 231, 240 in a 2026-05 "Gaming" config; its
+meaning is unknown.
 
 ---
 
-### Actuation control — current ssgg gap
+### How GG applies these settings
 
-`src/bin/discover_actuation.rs` scanned codes `0x00`–`0xFF` on 2026-05-27. No read-back command found.
-The hypothesized write command `0x2D` is implemented experimentally in `src/devices/keyboards/apex_pro_tkl_2023.rs`.
-
-Full rapid trigger requires sending all four of:
-1. `hall_thresholds` per-key (actuation depth)
-2. `second_actuation_thresholds` per-key (rapid trigger on/off per key)
-3. `rapid_trigger_sensitivity` per-key
-4. `release_mode` per-key
-
-Whether these are separate HID commands or combined is unknown without USB capture.
+GG does not send per-setting HID commands. After every change it rewrites the whole 12,500-byte on-board
+profile, which holds per-key tables for actuation, reset, release mode and Rapid Trigger sensitivity.
+Offsets, slot map and the unsolved checksum are in the capture note. ssgg's `0x2D` actuation command is
+`[EXPERIMENTAL]` and is not what GG sends.
 
 ---
 
@@ -214,12 +204,9 @@ CREATE TABLE zone_cache (
 
 `unique_id` values in this table are the same integers used in `config_json.zoneIds` — this is the bridge between layout data and RGB config.
 
-**`actuation_level` codes** (classification for reactive RGB effects, not actual mm thresholds):
-- `0` = standard mechanical switch (23 keys)
-- `100` = OmniPoint standard keys (51 keys)
-- `1000` = OmniPoint modifier/special keys (10 keys)
-
-Actual per-key actuation thresholds in mm live in the engine DB `hall_thresholds`.
+**`actuation_level`**: values seen for device 242 are `0` (23 keys: Esc, F-row, navigation cluster,
+arrows) and `600` (61 analog keys). It is a key class, not an actuation depth; per-key actuation lives
+in the engine DB `hall_thresholds`. The 23 `0` keys are the ones with no slot in the on-board profile.
 
 ### Config JSON structure
 
@@ -269,7 +256,7 @@ Actual per-key actuation thresholds in mm live in the engine DB `hall_thresholds
 - `SINGLE_COLOR` — static color (`defaultColor`)
 - `BLOOM` — reactive per-key ripple (requires bitmap coordinates)
 
-**Three lighting states** — the biggest gap vs. ssgg:
+**Three lighting states**:
 
 | State | When active |
 |-------|------------|
@@ -277,13 +264,13 @@ Actual per-key actuation thresholds in mm live in the engine DB `hall_thresholds
 | `idle` | After `idleTimeMs` ms of inactivity |
 | `reactive` | Key-press overlay on top of base/idle |
 
-ssgg's `Effect` models one state. GG has three independent states with transition timing.
+ssgg has no idle or reactive lighting state.
 
 ### Complete zone map — Apex Pro TKL 2023
 
 84 keys total (US layout). `al` = actuation_level.
 
-**Function row** (y=256, al=0 — standard switches):
+**Function row** (y=256, al=0):
 
 | unique_id | x | hid | key |
 |-----------|---|-----|-----|
@@ -397,11 +384,11 @@ ssgg's `Effect` models one state. GG has three independent states with transitio
 | 68119903602278400 | 689 | 81 | Down Arrow | 0 |
 | 68120058221101056 | 725 | 79 | Right Arrow | 0 |
 
-**Summary**: 84 keys — 61 OmniPoint (al=600), 23 standard mechanical (al=0).
+**Summary**: 84 keys, 61 analog (al=600) and 23 non-analog (al=0).
 
 **Notes**:
 - HID 240 (FN key) has no standard USB HID usage. SteelSeries assigns 0xF0 as a synthetic ID.
-- PrintScreen/ScrollLock/Pause are absent — these functions are likely FN combinations.
+- PrintScreen, ScrollLock and Pause have no key of their own.
 - `unique_id` values encode (x, y) bitmap position as 64-bit integers; decoding is unnecessary for ssgg since `hid_code` identifies keys directly.
 
 ---
@@ -409,7 +396,7 @@ ssgg's `Effect` models one state. GG has three independent states with transitio
 ## Sonar Database (Audio)
 
 Source: `GG\apps\sonar\db\database.db`, 2026-05-26.
-Status: partial — volume routing is not in this DB (likely device HID commands or separate storage).
+Status: partial. Volume routing is not stored in this DB.
 
 ### Tables
 
@@ -526,20 +513,28 @@ Filters 1–5 enabled by default; 6–10 off.
 Valorant Pro, CS:GO Pro, Apex Legends, COD Warzone, Fortnite Pro, League of Legends, FPS Footsteps.
 Each carries game-specific EQ tuning in its `data` JSON.
 
-### ssgg Sonar gap analysis
+### Relation to ssgg
 
-ssgg's `HeadsetProfile` (`src/profiles/mod.rs`) has four fields: `sidetone`, `mic_volume`, `eq_preset`, `auto_off_minutes`.
+ssgg does not read this database. `SonarClient` (`src/audio/sonar.rs`, feature `sonar`) talks to Sonar's
+local HTTP API: configs (list, select), channel volume and mute, chat mix, classic/streamer mode and
+stream redirections. EQ and mic DSP parameters are not implemented.
 
-| Sonar feature | ssgg | Gap |
-|---------------|------|-----|
-| 10-band parametric EQ | ❌ | **Missing** |
-| Noise reduction, noise gate, AI noise cancel, echo cancel | ❌ | **Missing** |
-| Bass/treble boost, voice clarity | ❌ | **Missing** |
-| Virtual surround (8-channel) | ❌ | **Missing** |
-| 5 independent VADs | ❌ | **Missing** |
-| Per-game profiles (`game_ids`) | ❌ | **Missing** |
-| Stream mode | ❌ | **Missing** |
-| Named EQ preset | `eq_preset: String` | Conceptual match to `configs.name` |
-| Sidetone / mic volume / auto-off | raw `u8` | Likely HID commands, not in this DB |
+### Shared config links (issue #277, researched 2026-10-15)
 
-The `SonarClient` in `src/audio/sonar.rs` should at minimum be able to read/write the parametric EQ `data` JSON per VAD. A full implementation would require modeling all 5 channels.
+Sonar's "share preset" produces a web link that carries only a pointer, not the EQ data:
+
+- Link: `https://www.steelseries.com/deeplink/gg/sonar/config/v1/import?url=<base64>` (format from a SteelSeries
+  employee's LinkedIn post; not found in the local GG install).
+- `url=` is plain base64 of a CDN URL, e.g. `https://community-configs.steelseriescdn.com/v1/<uuid>` (decoded).
+- An unauthenticated GET on that URL returned the config JSON (HTTP 200):
+  `{"data":{"data":{...},"schemaVersion":5,"virtualAudioDevice":"game"},"metadata":{"name":..,"author":..}}`.
+  `data.data` has the same shape as the `configs.data` column above: `parametricEQ.enabled` plus `filter1`..`filter10`,
+  each `{enabled, frequency (Hz), gain (dB), qFactor, type}`; `type` seen as `peakingEQ`, `lowShelving`,
+  `highShelving`.
+- GG registers the `ssgg://` URL scheme (`HKCU\Software\Classes\ssgg` -> `SteelSeriesGGClient.exe "%1"`); the
+  renderer imports through Sonar's local `GET <configs>/retrieveFromUrlHash?hash=<hash>` (strings in `app.asar`).
+
+Unknown, so no import code yet: the exact `ssgg://` form, whether `hash` is the base64 `url=` value, the body Sonar
+accepts to create a config (`POST /configs`?), `schemaVersion` compatibility, the full filter `type` list, and the
+CDN's terms of use. Sources: https://github.com/wex/sonar-rev (`openapi/swagger.json`),
+https://www.linkedin.com/pulse/steelseries-sonar-now-supports-sharing-peq-settings-kevin-lin.

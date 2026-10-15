@@ -2,6 +2,7 @@
 
 pub mod apex;
 pub mod apex_pro_tkl_2023;
+pub mod apex_pro_tkl_2023_profile;
 
 use super::diagnostics::{HidOperation, with_global_diagnostics};
 use super::hid_reports::{
@@ -395,18 +396,22 @@ impl GenericKeyboard {
 
     /// Send a HID feature report of arbitrary size (for Apex 2023 new protocol).
     /// Uses direct ioctl to bypass hidapi's broken HIDIOCSFEATURE direction bits.
-    /// Resolves the correct hidraw path for the control interface (interface 3 for wireless).
-    /// Resolves the correct hidraw path for the control interface (interface 3 for wireless).
+    /// Resolves the hidraw path: `info.path` for the wired 2023 model, interface 1 for the original
+    /// Apex Pro, interface 3 for the others.
     #[cfg(unix)]
     pub fn send_feature(&self, data: &[u8], report_len: usize) -> Result<()> {
+        use crate::devices::product_ids::{APEX_PRO, APEX_PRO_TKL_2023};
         // The wired 2023 model takes feature reports on USB interface 1, the control collection
-        // discovery already selected; interface 3 is the wireless layout.
-        let path = if self.info.product_id == crate::devices::product_ids::APEX_PRO_TKL_2023 {
-            self.info.path.clone()
-        } else {
-            super::find_hidraw_for_interface(self.info.vendor_id, self.info.product_id, 3)
-                .unwrap_or_else(|| self.info.path.clone())
+        // discovery already selected; interface 3 is the wireless layout. OpenRGB opens the
+        // original Apex Pro on interface 1 [EXPERIMENTAL, untested here].
+        let interface = match self.info.product_id {
+            APEX_PRO_TKL_2023 => None,
+            APEX_PRO => Some(1),
+            _ => Some(3),
         };
+        let path = interface
+            .and_then(|i| super::find_hidraw_for_interface(self.info.vendor_id, self.info.product_id, i))
+            .unwrap_or_else(|| self.info.path.clone());
         super::send_feature_report_raw(&path, data, report_len)
     }
 
@@ -934,13 +939,9 @@ macro_rules! impl_keyboard_with_delegation {
         impl Keyboard for $type {
             $($custom)*
             fn zone_count(&self) -> usize { self.inner.zone_count() }
-            async fn set_brightness(&mut self, brightness: u8) -> Result<()> { self.inner.set_brightness(brightness).await }
             fn supports_per_key_rgb(&self) -> bool { self.inner.supports_per_key_rgb() }
             fn get_key_mapping(&self) -> Option<&KeyMapping> { self.inner.get_key_mapping() }
-            async fn set_key_color_direct(&mut self, address: KeyAddress, color: Color) -> Result<()> { self.inner.set_key_color_direct(address, color).await }
-            async fn set_key_colors_direct(&mut self, key_colors: &[(KeyAddress, Color)]) -> Result<()> { self.inner.set_key_colors_direct(key_colors).await }
             async fn clear_per_key_rgb(&mut self) -> Result<()> { self.set_color(Color::BLACK).await }
-            async fn set_key_region(&mut self, start_hid: u8, count: u8, color: Color) -> Result<()> { self.inner.set_key_region(start_hid, count, color).await }
             fn get_zone_mapping(&self) -> Option<&ZoneMapping> { self.inner.get_zone_mapping() }
             async fn set_zone_effect(&mut self, effect: ZoneEffect) -> Result<()> { self.inner.set_zone_effect(effect).await }
             async fn simulate_per_key_with_zones(&mut self, key_colors: &[(KeyId, Color)]) -> Result<()> { self.inner.simulate_per_key_with_zones(key_colors).await }
@@ -1043,7 +1044,7 @@ mod tests {
     fn test_zone_count_mapping() {
         assert_eq!(zone_count_for_product_id(product_ids::APEX_PRO_TKL_2023), 9);
         assert_eq!(zone_count_for_product_id(product_ids::APEX_3), 10);
-        assert_eq!(zone_count_for_product_id(product_ids::APEX_3_TKL), 9);
+        assert_eq!(zone_count_for_product_id(product_ids::APEX_3_TKL), 8);
 
         assert_eq!(zone_count_for_product_id(0xFFFF), 1);
     }

@@ -11,8 +11,8 @@ use super::keyboards::apex::Apex3Tkl;
 use super::keyboards::apex_pro_tkl_2023::ApexProTkl2023;
 use super::keyboards::{GenericKeyboard, Keyboard};
 use super::product_ids::{
-    APEX_3_TKL, APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2, APEX_PRO_TKL_2024,
-    APEX_PRO_TKL_WIRELESS_2024, APEX_PRO_TKL_WIRELESS_2024_DONGLE,
+    APEX_3_TKL, APEX_PRO, APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2,
+    APEX_PRO_TKL_2024, APEX_PRO_TKL_WIRELESS_2024, APEX_PRO_TKL_WIRELESS_2024_DONGLE,
 };
 use super::{
     DeviceInfo, DeviceType, STEELSERIES_CONTROL_USAGE_PAGE, device_name_from_product_id, device_type_from_product_id,
@@ -200,6 +200,16 @@ impl Default for HotPlugConfig {
     }
 }
 
+fn reject_detect_only(info: &DeviceInfo) -> Result<()> {
+    if super::is_detect_only(info.product_id) {
+        return Err(Error::DeviceCommunication(format!(
+            "{} (PID {:#06x}) is detected but not supported yet: no protocol is known",
+            info.name, info.product_id
+        )));
+    }
+    Ok(())
+}
+
 /// Manages connected SteelSeries devices with hot-plug monitoring.
 pub struct DeviceManager {
     api: HidApi,
@@ -347,7 +357,9 @@ impl DeviceManager {
 
     /// Get the first device of a specific type.
     pub fn first_device_of_type(&self, device_type: DeviceType) -> Option<&DeviceInfo> {
-        self.devices_by_type(device_type).into_iter().next()
+        self.devices_by_type(device_type)
+            .into_iter()
+            .find(|d| !super::is_detect_only(d.product_id))
     }
 
     /// Resolve the control-endpoint `DeviceInfo` for a (vendor_id, product_id) pair.
@@ -431,6 +443,7 @@ impl DeviceManager {
                 info.name
             )));
         }
+        reject_detect_only(info)?;
 
         // Wireless Apex 2023 uses raw hidraw feature reports, not hidapi.
         // Try opening via hidapi; if it fails for wireless, create a dummy-device keyboard
@@ -456,7 +469,8 @@ impl DeviceManager {
         // Wrap in specific implementation if available
         match info.product_id {
             APEX_3_TKL => Ok(Box::new(Apex3Tkl::new(generic_keyboard))),
-            APEX_PRO_TKL_2023
+            APEX_PRO
+            | APEX_PRO_TKL_2023
             | APEX_PRO_TKL_2023_WIRELESS
             | APEX_PRO_TKL_2023_WIRELESS_2
             | APEX_PRO_TKL_2024
@@ -474,6 +488,7 @@ impl DeviceManager {
                 info.name
             )));
         }
+        reject_detect_only(info)?;
 
         let hid_device = self.open_device(info)?;
         Ok(Box::new(GenericHeadset::new(info.clone(), hid_device)))

@@ -15,6 +15,9 @@ jobs:
   build-linux:
     name: Build Linux / Arch x86_64
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
     container:
       image: archlinux:base-devel
 
@@ -27,6 +30,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create unprivileged build user (makepkg refuses to run as root)
         run: |
@@ -57,7 +61,7 @@ jobs:
       - name: Compute checksums
         run: |
           sha256sum ssgg-linux-x86_64.tar.gz > sha256sums-linux.txt
-          sha256sum *.pkg.tar.zst > sha256sums-arch.txt
+          sha256sum -- *.pkg.tar.zst > sha256sums-arch.txt
           cat sha256sums-linux.txt
           cat sha256sums-arch.txt
 

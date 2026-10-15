@@ -127,6 +127,43 @@ sudo usermod -aG input $USER
 ```
 Log out/in to apply the group change.
 
+### Windows
+
+Windows builds work but are not the primary target. No udev rules or driver changes are needed.
+
+**Prebuilt binary**: download `ssgg-windows-x86_64.exe` and `sha256sums-windows.txt` from the
+[latest release](https://github.com/Ven0m0/steelseriesgg-rs/releases/latest), then check the hash in PowerShell:
+
+```powershell
+(Get-FileHash .\ssgg-windows-x86_64.exe -Algorithm SHA256).Hash.ToLower()
+Get-Content .\sha256sums-windows.txt
+Rename-Item .\ssgg-windows-x86_64.exe ssgg.exe
+.\ssgg.exe devices
+```
+
+Move `ssgg.exe` to a folder on your `PATH` to run it from anywhere.
+
+**Build from source**: install [rustup](https://rustup.rs) and the Visual Studio Build Tools with the
+"Desktop development with C++" workload (the `x86_64-pc-windows-msvc` target needs the MSVC linker), then:
+
+```powershell
+git clone https://github.com/Ven0m0/steelseriesgg-rs.git
+cd steelseriesgg-rs
+cargo build --release --locked
+.\target\release\ssgg.exe devices
+```
+
+Notes:
+
+- Quit SteelSeries GG before using `ssgg rgb`. GG's engine keeps rewriting the lighting and overrides `ssgg`;
+  `ssgg rgb` prints a warning while `SteelSeriesEngine.exe` is running. End every `SteelSeries*` process in Task
+  Manager, or the engine restarts itself.
+- The `audio` feature needs PulseAudio and does not build on Windows. `--features sonar` works.
+- There is no Windows service; run `ssgg daemon` in a terminal or from Task Scheduler at logon.
+- Config file: `%APPDATA%\steelseries-gg\ssgg\config\config.toml`.
+- `ssgg pollrate status` reports "unsupported on this driver" for USB devices; Windows HID drivers do not expose the
+  poll rate.
+
 ## Usage
 
 ### List devices
@@ -314,7 +351,6 @@ debug = false
 
 - `audio` - Enable audio mixer with PulseAudio/PipeWire support
 - `sonar` - Enable SteelSeries Sonar API integration
-- `experimental-apex-2023` - Enable experimental Apex Pro TKL 2023 direct per-key RGB (unverified on hardware)
 
 By default, no optional features are enabled. The Arch package ships with default features only.
 

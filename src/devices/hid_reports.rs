@@ -17,12 +17,6 @@ pub const KEYBOARD_REPORT_SIZE: usize = 65;
 /// Standard HID report size for SteelSeries headsets (no report ID).
 pub const HEADSET_REPORT_SIZE: usize = 64;
 
-/// HID feature report size for the Apex Pro TKL 2023 per-key RGB command (0x40).
-///
-/// Confirmed via IOCTL_HID_SET_FEATURE capture: 3-byte header + 84 key entries × 4 bytes + 306-byte zero padding.
-#[cfg(feature = "experimental-apex-2023")]
-pub const APEX_2023_PERKEY_REPORT_SIZE: usize = 645;
-
 /// Maximum number of RGB zones supported by keyboards.
 pub const MAX_RGB_ZONES: usize = 12;
 
@@ -44,14 +38,15 @@ pub enum CommandCode {
     /// NOTE: This command code is a placeholder. The actual per-key RGB command
     /// for SteelSeries keyboards has not been discovered and may be different.
     PerKeyRgb = 0x23,
-    /// Apex Pro TKL 2023 experimental direct per-key RGB control (0x40)
-    ///
-    /// NOTE: This command is based on reverse-engineering notes and is kept
-    /// behind the `experimental-apex-2023` feature until validated on hardware.
+    /// [EXPERIMENTAL] Apex Pro TKL 2023 direct-mode lighting frame (0x40), sent as a feature
+    /// report by `ApexProTkl2023`. See docs/development/apex-pro-tkl-2023-gg-capture.md.
     Apex2023Direct = 0x40,
     /// Actuation point control (0x2D) - EXPERIMENTAL
     /// NOTE: This command code is experimental based on hardware research.
     ActuationControl = 0x2D,
+    /// [EXPERIMENTAL] Apex Pro TKL 2023 on-board profile chunk (0x03, header `03 01 80`), see
+    /// `ProfileChunkCommand`.
+    ProfileChunk = 0x03,
 }
 
 impl fmt::Display for CommandCode {
@@ -65,6 +60,7 @@ impl fmt::Display for CommandCode {
             CommandCode::PerKeyRgb => write!(f, "PERKEY_RGB_EXPERIMENTAL"),
             CommandCode::Apex2023Direct => write!(f, "APEX2023_DIRECT_EXPERIMENTAL"),
             CommandCode::ActuationControl => write!(f, "ACTUATION_CTRL_EXPERIMENTAL"),
+            CommandCode::ProfileChunk => write!(f, "PROFILE_CHUNK_EXPERIMENTAL"),
         }
     }
 }
@@ -84,6 +80,7 @@ impl CommandCode {
             0x23 | 0x2A => Some(CommandCode::PerKeyRgb),
             0x40 => Some(CommandCode::Apex2023Direct),
             0x2D => Some(CommandCode::ActuationControl),
+            0x03 => Some(CommandCode::ProfileChunk),
             _ => None,
         }
     }
@@ -302,6 +299,137 @@ impl HidCommand for BrightnessCommand {
 
     fn description(&self) -> String {
         format!("Set brightness to {}%", self.brightness)
+    }
+}
+
+/// [EXPERIMENTAL] Brightness for 8-zone Apex keyboards (Apex 3 TKL): `00 23 <0x00-0x10>`.
+///
+/// Source: OpenRGB `SteelSeriesApex8ZoneController.cpp` (`SetBrightness`), untested on hardware.
+/// On this controller `0x22` (`CommandCode::Brightness`) selects the rainbow-wave mode instead.
+/// `CommandCode` cannot hold a second `0x23` variant, so `command_code()` (used only for logging) reports
+/// `PerKeyRgb`; the opcode is written from `OPCODE`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Apex8ZoneBrightnessCommand {
+    /// Device brightness level (0x00-0x10).
+    pub level: u8,
+}
+
+impl Apex8ZoneBrightnessCommand {
+    /// Maximum device brightness level.
+    pub const MAX_LEVEL: u8 = 0x10;
+    /// Brightness opcode on 8-zone controllers. Same byte as the `PerKeyRgb` placeholder, unrelated meaning.
+    const OPCODE: u8 = 0x23;
+
+    /// Create from a 0-100 percentage, rounded to the nearest device level.
+    pub fn from_percent(percent: u8) -> Self {
+        let percent = u16::from(percent.min(100));
+        Self {
+            level: ((percent * u16::from(Self::MAX_LEVEL) + 50) / 100) as u8,
+        }
+    }
+}
+
+impl HidCommand for Apex8ZoneBrightnessCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::PerKeyRgb
+    }
+
+    fn serialize(&self, buffer: &mut [u8], device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+
+        let report_size = device_type.report_size();
+        if buffer.len() < report_size {
+            return Err(Error::DeviceCommunication(format!(
+                "Buffer too small: {} bytes (expected {})",
+                buffer.len(),
+                report_size
+            )));
+        }
+
+        buffer[..report_size].fill(0);
+        let offset = usize::from(device_type.includes_report_id());
+        buffer[offset] = Self::OPCODE;
+        buffer[offset + 1] = self.level;
+
+        Ok(report_size)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.level > Self::MAX_LEVEL {
+            return Err(Error::DeviceCommunication(format!(
+                "Invalid 8-zone brightness level: {} (max {})",
+                self.level,
+                Self::MAX_LEVEL
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Set 8-zone brightness to level {}", self.level)
+    }
+}
+
+/// [EXPERIMENTAL] Report-ID byte plus the 644 wire bytes of one profile chunk feature report.
+pub const PROFILE_CHUNK_REPORT_SIZE: usize = 645;
+
+/// [EXPERIMENTAL] One chunk of the wired Apex Pro TKL 2023 (PID 0x1628) on-board profile upload, a feature
+/// report: `00 | 03 01 80 | len u16 LE | offset u16 LE | 00 00 | data | zero padding`.
+///
+/// Layout from GG USBPcap captures (2026-10-14). Nothing sends it: no profile read-back is known, so a write
+/// would replace the board's other settings (docs/development/apex-pro-tkl-2023-gg-capture.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileChunkCommand<'a> {
+    /// Byte offset of `data` in the 12,500-byte profile blob.
+    pub offset: u16,
+    /// Chunk payload (GG always sent 500 bytes).
+    pub data: &'a [u8],
+}
+
+impl ProfileChunkCommand<'_> {
+    /// Largest payload seen in a chunk.
+    pub const MAX_DATA_LEN: usize = 500;
+    const HEADER: [u8; 3] = [CommandCode::ProfileChunk as u8, 0x01, 0x80];
+    const DATA_OFFSET: usize = 10;
+}
+
+impl HidCommand for ProfileChunkCommand<'_> {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::ProfileChunk
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        if buffer.len() < PROFILE_CHUNK_REPORT_SIZE {
+            return Err(Error::DeviceCommunication(format!(
+                "Buffer too small: {} bytes (expected {})",
+                buffer.len(),
+                PROFILE_CHUNK_REPORT_SIZE
+            )));
+        }
+
+        let report = &mut buffer[..PROFILE_CHUNK_REPORT_SIZE];
+        report.fill(0);
+        report[1..4].copy_from_slice(&Self::HEADER);
+        report[4..6].copy_from_slice(&(self.data.len() as u16).to_le_bytes());
+        report[6..8].copy_from_slice(&self.offset.to_le_bytes());
+        report[Self::DATA_OFFSET..Self::DATA_OFFSET + self.data.len()].copy_from_slice(self.data);
+        Ok(PROFILE_CHUNK_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.data.is_empty() || self.data.len() > Self::MAX_DATA_LEN {
+            return Err(Error::DeviceCommunication(format!(
+                "Profile chunk must carry 1-{} bytes, got {}",
+                Self::MAX_DATA_LEN,
+                self.data.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Profile chunk: {} bytes at offset {}", self.data.len(), self.offset)
     }
 }
 
@@ -676,136 +804,6 @@ impl HidCommand for PerKeyRgbCommand {
 
     fn description(&self) -> String {
         format!("Set {} keys via HID code addressing", self.key_colors.len())
-    }
-}
-
-/// Confirmed direct per-key RGB command for Apex Pro TKL 2023 (`0x1628`).
-///
-/// Sends a 645-byte HID feature report (IOCTL_HID_SET_FEATURE, code 0x40) containing
-/// up to 84 key entries. Each entry is `[key_id, R, G, B]` where key_id is the USB HID
-/// keyboard usage ID. The count byte is always 0x54 (= 84). Remaining bytes are zero-padded.
-///
-/// Packet layout (confirmed via live capture from SteelSeriesEngine.exe):
-/// ```text
-/// [0x00][0x40][0x54][key_id R G B] × 84 + [0x00 × 306]
-/// ```
-#[cfg(feature = "experimental-apex-2023")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Apex2023DirectCommand {
-    /// Key ID and color pairs.
-    ///
-    /// `key_id` is a USB HID keyboard usage ID (e.g. 0x04 = A, 0x28 = Enter).
-    /// Keys are transmitted in the order added; the firmware ignores order.
-    pub key_colors: smallvec::SmallVec<[(u8, Color); 84]>,
-}
-
-#[cfg(feature = "experimental-apex-2023")]
-impl Apex2023DirectCommand {
-    /// Maximum key entries per report (confirmed via live IOCTL capture).
-    ///
-    /// The 645-byte report carries exactly 84 `[key_id R G B]` entries.
-    /// The count byte (offset 2) is always 0x54 = 84.
-    pub const MAX_KEYS_PER_REPORT: usize = 84;
-
-    /// Fixed count byte transmitted at offset 2 of every per-key RGB report.
-    const KEY_COUNT_BYTE: u8 = 0x54;
-
-    /// Create an empty direct command.
-    pub fn new() -> Self {
-        Self {
-            key_colors: smallvec::SmallVec::new(),
-        }
-    }
-
-    /// Add or update a logical key color.
-    pub fn set_key_color(&mut self, key_id: u8, color: Color) {
-        // Linear scan via a loop over idiomatic slice iterator.
-        // The overhead of iter_mut().find() closure is eliminated.
-        for (existing_key_id, existing_color) in &mut self.key_colors {
-            if *existing_key_id == key_id {
-                *existing_color = color;
-                return;
-            }
-        }
-
-        // Prevent exceeding the fixed boundary when pushing
-        if self.key_colors.len() < Self::MAX_KEYS_PER_REPORT {
-            self.key_colors.push((key_id, color));
-        }
-    }
-
-    /// Number of logical keys in this command.
-    pub fn key_count(&self) -> usize {
-        self.key_colors.len()
-    }
-
-    /// Whether the command contains no key updates.
-    pub fn is_empty(&self) -> bool {
-        self.key_colors.is_empty()
-    }
-}
-
-#[cfg(feature = "experimental-apex-2023")]
-impl Default for Apex2023DirectCommand {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "experimental-apex-2023")]
-impl HidCommand for Apex2023DirectCommand {
-    fn command_code(&self) -> CommandCode {
-        CommandCode::Apex2023Direct
-    }
-
-    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
-        self.validate()?;
-
-        if buffer.len() < APEX_2023_PERKEY_REPORT_SIZE {
-            return Err(Error::DeviceCommunication(format!(
-                "Buffer too small: {} bytes (expected {})",
-                buffer.len(),
-                APEX_2023_PERKEY_REPORT_SIZE
-            )));
-        }
-
-        buffer[..APEX_2023_PERKEY_REPORT_SIZE].fill(0);
-
-        buffer[0] = 0x00; // report ID
-        buffer[1] = CommandCode::Apex2023Direct as u8;
-        buffer[2] = Self::KEY_COUNT_BYTE;
-
-        let mut offset = 3;
-        for (key_id, color) in &self.key_colors {
-            buffer[offset] = *key_id;
-            buffer[offset + 1] = color.r;
-            buffer[offset + 2] = color.g;
-            buffer[offset + 3] = color.b;
-            offset += 4;
-        }
-
-        Ok(APEX_2023_PERKEY_REPORT_SIZE)
-    }
-
-    fn validate(&self) -> Result<()> {
-        if self.key_colors.is_empty() {
-            return Err(Error::DeviceCommunication(
-                "Apex 2023 per-key RGB command must have at least one key".to_string(),
-            ));
-        }
-
-        if self.key_colors.len() > Self::MAX_KEYS_PER_REPORT {
-            return Err(Error::DeviceCommunication(format!(
-                "Apex 2023 per-key RGB command exceeds {} keys per report",
-                Self::MAX_KEYS_PER_REPORT
-            )));
-        }
-
-        Ok(())
-    }
-
-    fn description(&self) -> String {
-        format!("Apex 2023 per-key RGB for {} keys", self.key_colors.len())
     }
 }
 
@@ -1675,34 +1673,23 @@ mod tests {
         assert!(cmd.validate().is_ok());
     }
 
-    #[cfg(feature = "experimental-apex-2023")]
     #[test]
-    fn test_apex_2023_direct_command_serialization() {
-        let mut cmd = Apex2023DirectCommand::new();
-        cmd.set_key_color(0x04, Color::RED);
-        cmd.set_key_color(0x52, Color::BLUE);
+    fn test_apex_8zone_brightness_report() {
+        assert_eq!(Apex8ZoneBrightnessCommand::from_percent(0).level, 0x00);
+        assert_eq!(Apex8ZoneBrightnessCommand::from_percent(50).level, 0x08);
+        assert_eq!(Apex8ZoneBrightnessCommand::from_percent(100).level, 0x10);
+        assert_eq!(Apex8ZoneBrightnessCommand::from_percent(255).level, 0x10);
 
         let builder = HidReportBuilder::new(HidDeviceType::Keyboard);
-        let mut buffer = [0u8; APEX_2023_PERKEY_REPORT_SIZE];
-        let size = builder.build_report(cmd, &mut buffer).unwrap();
+        let mut buffer = [0xAAu8; KEYBOARD_REPORT_SIZE];
+        let size = builder
+            .build_report(Apex8ZoneBrightnessCommand::from_percent(50), &mut buffer)
+            .unwrap();
+        assert_eq!(size, KEYBOARD_REPORT_SIZE);
+        assert_eq!(&buffer[..3], &[0x00, 0x23, 0x08]);
+        assert!(buffer[3..].iter().all(|&b| b == 0));
 
-        // Confirmed 645-byte format from live IOCTL_HID_SET_FEATURE capture.
-        assert_eq!(size, APEX_2023_PERKEY_REPORT_SIZE);
-        assert_eq!(buffer[0], 0x00); // report ID
-        assert_eq!(buffer[1], 0x40); // command byte
-        assert_eq!(buffer[2], 0x54); // fixed count = 84
-        // first key entry at offset 3
-        assert_eq!(buffer[3], 0x04); // key_id A
-        assert_eq!(buffer[4], 255); // R
-        assert_eq!(buffer[5], 0); // G
-        assert_eq!(buffer[6], 0); // B
-        // second key entry at offset 7
-        assert_eq!(buffer[7], 0x52); // key_id Up
-        assert_eq!(buffer[8], 0); // R
-        assert_eq!(buffer[9], 0); // G
-        assert_eq!(buffer[10], 255); // B
-        // remainder is zero-padded
-        assert!(buffer[11..].iter().all(|&b| b == 0));
+        assert!(Apex8ZoneBrightnessCommand { level: 0x11 }.validate().is_err());
     }
 
     #[test]

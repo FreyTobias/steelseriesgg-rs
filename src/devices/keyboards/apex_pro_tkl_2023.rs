@@ -2,8 +2,6 @@
 
 use super::{GenericKeyboard, Keyboard};
 use crate::Result;
-#[cfg(feature = "experimental-apex-2023")]
-use crate::devices::hid_reports::APEX_2023_PERKEY_REPORT_SIZE;
 use crate::devices::hid_reports::{
     ActuationCommand, HidCommand, HidDeviceType, HidReportBuilder, KEYBOARD_REPORT_SIZE,
 };
@@ -20,6 +18,9 @@ const APEX_2023_PACKET_LENGTH: usize = 643;
 const APEX_2023_PACKET_ID_INIT: u8 = 0x4B;
 const APEX_2023_PACKET_ID_DIRECT_WIRED: u8 = 0x40;
 const APEX_2023_PACKET_ID_DIRECT_WIRELESS: u8 = 0x61;
+/// [EXPERIMENTAL] Direct-mode packet ID of the original Apex Pro (PID 0x1610): OpenRGB's
+/// `APEX_GEN1_PACKET_ID_DIRECT`, same 643-byte layout and key table, no init. Untested here (issue #283).
+const APEX_GEN1_PACKET_ID_DIRECT: u8 = 0x3A;
 
 /// TKL key HID codes (from OpenRGB SteelSeriesApexController.cpp).
 const TKL_KEYS: &[u8] = &[
@@ -57,7 +58,8 @@ const WIRED_2023_PACKET_LENGTH: usize = 645;
 ///   the set follows the JIS/ISO layout) and Tab/Caps (14, 28).
 /// - Remaining slots follow the row order; slot 0 (grave) is the only key left for it.
 ///
-/// Writing the blob is blocked: its checksum at offset 12320 is unsolved.
+/// The checksum at offset 12320 is solved (`apex_pro_tkl_2023_profile`), but writing the blob stays blocked:
+/// no read-back command is known.
 pub const WIRED_2023_PROFILE_SLOTS: [u8; 68] = [
     // ` 1 2 3 4 5 6 7 8 9 0 - = Yen
     0x35, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2D, 0x2E, 0x89,
@@ -87,7 +89,17 @@ pub fn profile_slot(usage: u8) -> Option<usize> {
     WIRED_2023_PROFILE_SLOTS.iter().position(|&u| u == usage)
 }
 
-/// Apex Pro TKL 2023 implementation.
+/// Colour of `usage` in a per-key request (last entry wins), black if it is not listed.
+fn per_key_color(key_colors: &[(u8, Color)], usage: u8) -> Color {
+    key_colors
+        .iter()
+        .rev()
+        .find(|(k, _)| *k == usage)
+        .map_or(Color::BLACK, |(_, c)| *c)
+}
+
+/// Apex Pro TKL 2023 implementation; also drives the other models that take direct-mode lighting
+/// frames as feature reports (Gen 3, and `[EXPERIMENTAL]` the original Apex Pro).
 pub struct ApexProTkl2023 {
     inner: GenericKeyboard,
     initialized_new_protocol: bool,
@@ -123,6 +135,11 @@ impl ApexProTkl2023 {
     /// was not seen in the capture.
     fn is_wired_2023(&self) -> bool {
         self.inner.info().product_id == product_ids::APEX_PRO_TKL_2023
+    }
+
+    /// The original Apex Pro speaks OpenRGB's "Gen 1" direct protocol, which needs no init report.
+    fn is_gen1(&self) -> bool {
+        self.inner.info().product_id == product_ids::APEX_PRO
     }
 
     fn direct_keys(&self) -> &'static [u8] {
@@ -165,13 +182,14 @@ impl ApexProTkl2023 {
             | product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE
             | product_ids::APEX_PRO_TKL_WIRELESS_2024 => APEX_2023_PACKET_ID_DIRECT_WIRELESS,
             product_ids::APEX_PRO_TKL_2024 | product_ids::APEX_PRO_TKL_2023 => APEX_2023_PACKET_ID_DIRECT_WIRED,
+            product_ids::APEX_PRO => APEX_GEN1_PACKET_ID_DIRECT,
             _ => return None,
         })
     }
 
     /// Send the 0x4B initialization feature report required by new protocol.
     fn ensure_new_protocol_init(&mut self) -> Result<()> {
-        if self.initialized_new_protocol || self.is_wired_2023() {
+        if self.initialized_new_protocol || self.is_wired_2023() || self.is_gen1() {
             return Ok(());
         }
         let mut buf = vec![0u8; APEX_2023_PACKET_LENGTH];
@@ -185,10 +203,14 @@ impl ApexProTkl2023 {
         Ok(())
     }
 
-    /// Send per-key direct RGB using the new 643-byte feature report protocol.
-    fn send_direct_rgb_new_protocol(&mut self, color: Color) -> Result<()> {
+    /// Send one direct-mode feature report covering every key in `direct_keys()`.
+    fn send_direct_frame(&mut self, color_for: impl Fn(u8) -> Color) -> Result<()> {
         self.ensure_new_protocol_init()?;
+        let buf = self.build_direct_frame(color_for);
+        self.inner.send_feature(&buf, buf.len())
+    }
 
+    fn build_direct_frame(&self, color_for: impl Fn(u8) -> Color) -> Vec<u8> {
         let packet_id = self.direct_packet_id().unwrap_or(APEX_2023_PACKET_ID_DIRECT_WIRED);
 
         let keys = self.direct_keys();
@@ -199,14 +221,33 @@ impl ApexProTkl2023 {
         buf[2] = keys.len() as u8;
 
         for (i, &hid_code) in keys.iter().enumerate() {
+            let color = color_for(hid_code);
             let offset = 3 + i * 4;
             buf[offset] = hid_code;
             buf[offset + 1] = color.r;
             buf[offset + 2] = color.g;
             buf[offset + 3] = color.b;
         }
+        buf
+    }
 
-        self.inner.send_feature(&buf, packet_length)
+    /// Send per-key direct RGB using the new 643-byte feature report protocol.
+    fn send_direct_rgb_new_protocol(&mut self, color: Color) -> Result<()> {
+        self.send_direct_frame(|_| color)
+    }
+
+    /// [EXPERIMENTAL] Per-key colours as one direct frame. Keys not listed are sent black: a frame
+    /// replaces every key and the board has no known read-back, so there is no prior state to keep.
+    fn send_direct_key_colors(&mut self, key_colors: &[(u8, Color)]) -> Result<()> {
+        for (usage, _) in key_colors.iter().filter(|(u, _)| !self.direct_keys().contains(u)) {
+            tracing::warn!("HID usage {usage:#04x} is not addressable in direct mode; skipped");
+        }
+        if !key_colors.iter().any(|(usage, _)| self.direct_keys().contains(usage)) {
+            return Err(crate::Error::DeviceCommunication(
+                "None of the requested keys is addressable in direct mode".to_string(),
+            ));
+        }
+        self.send_direct_frame(|usage| per_key_color(key_colors, usage))
     }
 
     /// Set actuation point for all keys (global).
@@ -233,141 +274,6 @@ impl ApexProTkl2023 {
         let command = ActuationCommand::from_mm(mm);
         self.set_actuation_point(command.actuation_point)
     }
-
-    #[cfg(feature = "experimental-apex-2023")]
-    const fn experimental_direct_key_id(key_id: KeyId) -> Option<u8> {
-        Some(match key_id {
-            KeyId::A => 0x04,
-            KeyId::B => 0x05,
-            KeyId::C => 0x06,
-            KeyId::D => 0x07,
-            KeyId::E => 0x08,
-            KeyId::F => 0x09,
-            KeyId::G => 0x0A,
-            KeyId::H => 0x0B,
-            KeyId::I => 0x0C,
-            KeyId::J => 0x0D,
-            KeyId::K => 0x0E,
-            KeyId::L => 0x0F,
-            KeyId::M => 0x10,
-            KeyId::N => 0x11,
-            KeyId::O => 0x12,
-            KeyId::P => 0x13,
-            KeyId::Q => 0x14,
-            KeyId::R => 0x15,
-            KeyId::S => 0x16,
-            KeyId::T => 0x17,
-            KeyId::U => 0x18,
-            KeyId::V => 0x19,
-            KeyId::W => 0x1A,
-            KeyId::X => 0x1B,
-            KeyId::Y => 0x1C,
-            KeyId::Z => 0x1D,
-            KeyId::Key1 => 0x1E,
-            KeyId::Key2 => 0x1F,
-            KeyId::Key3 => 0x20,
-            KeyId::Key4 => 0x21,
-            KeyId::Key5 => 0x22,
-            KeyId::Key6 => 0x23,
-            KeyId::Key7 => 0x24,
-            KeyId::Key8 => 0x25,
-            KeyId::Key9 => 0x26,
-            KeyId::Key0 => 0x27,
-            KeyId::Enter => 0x28,
-            KeyId::Escape => 0x29,
-            KeyId::Backspace => 0x2A,
-            KeyId::Tab => 0x2B,
-            KeyId::Space => 0x2C,
-            KeyId::Minus => 0x2D,
-            KeyId::Equal => 0x2E,
-            KeyId::LeftBracket => 0x2F,
-            KeyId::RightBracket => 0x30,
-            KeyId::Backslash => 0x31,
-            KeyId::Semicolon => 0x33,
-            KeyId::Quote => 0x34,
-            KeyId::Backtick => 0x35,
-            KeyId::Comma => 0x36,
-            KeyId::Period => 0x37,
-            KeyId::Slash => 0x38,
-            KeyId::CapsLock => 0x39,
-            KeyId::F1 => 0x3A,
-            KeyId::F2 => 0x3B,
-            KeyId::F3 => 0x3C,
-            KeyId::F4 => 0x3D,
-            KeyId::F5 => 0x3E,
-            KeyId::F6 => 0x3F,
-            KeyId::F7 => 0x40,
-            KeyId::F8 => 0x41,
-            KeyId::F9 => 0x42,
-            KeyId::F10 => 0x43,
-            KeyId::F11 => 0x44,
-            KeyId::F12 => 0x45,
-            KeyId::Insert => 0x49,
-            KeyId::Home => 0x4A,
-            KeyId::PageUp => 0x4B,
-            KeyId::Delete => 0x4C,
-            KeyId::End => 0x4D,
-            KeyId::PageDown => 0x4E,
-            KeyId::ArrowRight => 0x4F,
-            KeyId::ArrowLeft => 0x50,
-            KeyId::ArrowDown => 0x51,
-            KeyId::ArrowUp => 0x52,
-            KeyId::Menu => 0x65,
-            KeyId::LeftCtrl => 0xE0,
-            KeyId::LeftShift => 0xE1,
-            KeyId::LeftAlt => 0xE2,
-            KeyId::LeftWin => 0xE3,
-            KeyId::RightCtrl => 0xE4,
-            KeyId::RightShift => 0xE5,
-            KeyId::RightAlt => 0xE6,
-            KeyId::RightWin => 0xE7,
-            KeyId::SteelSeriesKey | KeyId::VolumeWheel => return None,
-            KeyId::NumLock
-            | KeyId::NumSlash
-            | KeyId::NumAsterisk
-            | KeyId::NumMinus
-            | KeyId::Num7
-            | KeyId::Num8
-            | KeyId::Num9
-            | KeyId::NumPlus
-            | KeyId::Num4
-            | KeyId::Num5
-            | KeyId::Num6
-            | KeyId::Num1
-            | KeyId::Num2
-            | KeyId::Num3
-            | KeyId::NumEnter
-            | KeyId::Num0
-            | KeyId::NumPeriod => return None,
-        })
-    }
-
-    #[cfg(feature = "experimental-apex-2023")]
-    fn build_experimental_direct_command(
-        &self,
-        key_colors: &[(KeyId, Color)],
-    ) -> Option<crate::devices::hid_reports::Apex2023DirectCommand> {
-        use crate::devices::hid_reports::Apex2023DirectCommand;
-
-        if key_colors.is_empty() {
-            return None;
-        }
-
-        let mut command = Apex2023DirectCommand::new();
-        for (key_id, color) in key_colors {
-            let Some(direct_key_id) = Self::experimental_direct_key_id(*key_id) else {
-                // Key not addressable via the 0x40 protocol (e.g. SteelSeries key, volume wheel)
-                continue;
-            };
-            command.set_key_color(direct_key_id, *color);
-        }
-
-        if command.is_empty() {
-            return None;
-        }
-
-        Some(command)
-    }
 }
 
 // Delegate Device trait
@@ -383,7 +289,7 @@ impl Device for ApexProTkl2023 {
     fn initialize(&mut self) -> Result<()> {
         // Wireless variant uses feature reports for init, not output reports.
         // The 0x4B init is sent lazily in ensure_new_protocol_init().
-        if self.is_wireless() {
+        if self.is_wireless() || self.is_gen1() {
             return Ok(());
         }
         self.inner.initialize()
@@ -434,20 +340,49 @@ crate::impl_keyboard_with_delegation!(ApexProTkl2023, {
         self.inner.apply().await
     }
 
+    async fn set_brightness(&mut self, brightness: u8) -> Result<()> {
+        self.inner.set_brightness(brightness).await
+    }
+
     async fn set_key_color(&mut self, key_id: KeyId, color: Color) -> Result<()> {
         self.set_key_colors(&[(key_id, color)]).await
     }
 
     async fn set_key_colors(&mut self, key_colors: &[(KeyId, Color)]) -> Result<()> {
-        #[cfg(feature = "experimental-apex-2023")]
-        if let Some(command) = self.build_experimental_direct_command(key_colors) {
-            let report_builder = HidReportBuilder::new(HidDeviceType::Keyboard);
-            let mut buffer = [0u8; APEX_2023_PERKEY_REPORT_SIZE];
-            let size = report_builder.build_report(command, &mut buffer)?;
-            return self.inner.send_raw(&buffer[..size]);
+        if !self.uses_new_protocol() {
+            return self.inner.set_key_colors(key_colors).await;
         }
+        let mapping = self.inner.get_key_mapping().ok_or_else(|| {
+            crate::Error::DeviceCommunication("Per-key RGB not supported - no key mapping available".to_string())
+        })?;
+        let mut usages = Vec::with_capacity(key_colors.len());
+        for (key_id, color) in key_colors {
+            match mapping.get_key_address(*key_id) {
+                Some(address) => usages.push((address.hid_code, *color)),
+                None => tracing::warn!("Key {key_id:?} not found in key mapping"),
+            }
+        }
+        self.send_direct_key_colors(&usages)
+    }
 
-        self.inner.set_key_colors(key_colors).await
+    async fn set_key_color_direct(&mut self, address: KeyAddress, color: Color) -> Result<()> {
+        self.set_key_colors_direct(&[(address, color)]).await
+    }
+
+    async fn set_key_colors_direct(&mut self, key_colors: &[(KeyAddress, Color)]) -> Result<()> {
+        if !self.uses_new_protocol() {
+            return self.inner.set_key_colors_direct(key_colors).await;
+        }
+        let usages: Vec<(u8, Color)> = key_colors.iter().map(|(a, c)| (a.hid_code, *c)).collect();
+        self.send_direct_key_colors(&usages)
+    }
+
+    async fn set_key_region(&mut self, start_hid: u8, count: u8, color: Color) -> Result<()> {
+        if !self.uses_new_protocol() {
+            return self.inner.set_key_region(start_hid, count, color).await;
+        }
+        let usages: Vec<(u8, Color)> = (0..count).map(|i| (start_hid.wrapping_add(i), color)).collect();
+        self.send_direct_key_colors(&usages)
     }
 
     fn read_actuation_point(&mut self) -> Result<u8> {
@@ -542,6 +477,31 @@ mod tests {
     }
 
     #[test]
+    fn wired_2023_per_key_frame_lights_only_requested_keys() {
+        let keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2023);
+        let requested = [(0x1A, Color::RED), (0x29, Color::BLUE)]; // W, Esc
+        let frame = keyboard.build_direct_frame(|usage| per_key_color(&requested, usage));
+
+        assert_eq!(frame.len(), WIRED_2023_PACKET_LENGTH);
+        assert_eq!(&frame[..3], &[0x00, APEX_2023_PACKET_ID_DIRECT_WIRED, 0x54]);
+        for (i, entry) in frame[3..3 + WIRED_2023_KEYS.len() * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(entry[0], WIRED_2023_KEYS[i]);
+            let expected = match entry[0] {
+                0x1A => [255, 0, 0],
+                0x29 => [0, 0, 255],
+                _ => [0, 0, 0],
+            };
+            assert_eq!(&entry[1..], &expected, "usage {:#04x}", entry[0]);
+        }
+        assert!(frame[3 + WIRED_2023_KEYS.len() * 4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
     fn wired_2023_key_table_has_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         assert!(WIRED_2023_KEYS.iter().all(|k| seen.insert(*k)));
@@ -593,6 +553,15 @@ mod tests {
         assert_eq!(profile_slot(0x29), None); // Esc
         assert_eq!(profile_slot(0x3A), None); // F1
         assert_eq!(profile_slot(0x4F), None); // Right arrow
+    }
+
+    #[test]
+    fn original_apex_pro_uses_openrgb_gen1_frame() {
+        let keyboard = keyboard_for(product_ids::APEX_PRO);
+        assert_eq!(keyboard.direct_packet_id(), Some(APEX_GEN1_PACKET_ID_DIRECT));
+        let frame = keyboard.build_direct_frame(|_| Color::RED);
+        assert_eq!(frame.len(), APEX_2023_PACKET_LENGTH);
+        assert_eq!(&frame[..7], &[0x00, 0x3A, 112, 0x04, 0xFF, 0x00, 0x00]);
     }
 
     #[test]

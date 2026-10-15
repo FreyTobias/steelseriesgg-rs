@@ -1,500 +1,191 @@
----
-goal: Execution-ready implementation plan for the open backlog (issues + TODO).
-date_created: 2026-03-17
-last_updated: 2026-08-18
-last_reviewed: 2026-06-15
-status: In Progress
-sources: GitHub issues #173 · TODO.md · OpenRGB SteelSeriesApex8ZoneController · prior PLAN.md
----
+# PLAN: next steps
 
-# PLAN: implementation priorities
+Single backlog for steelseriesgg-rs. Replaces the old `PLAN.md`, `TODO.md` and `handoff.md`.
+Last reviewed 2026-10-15 against `main` at `a7e5915`.
 
-Converts the open GitHub issues (excluding the Renovate Dependency Dashboard #126) and the
-active TODO backlog into one prioritized, execution-ready order for a future agent session.
+Read `AGENTS.md` (same file as `CLAUDE.md`) and `.claude/rules/experimental-protocol.md` before any code change.
+Protocol facts for the Apex Pro TKL 2023 are in `AGENTS.md` ("Protocol research notes") and
+`docs/development/apex-pro-tkl-2023-gg-capture.md`; this file only tracks work.
 
----
+## Baseline (verified 2026-10-15, Windows)
 
-## 1. Overview
+- `cargo clippy-ci` (alias for `clippy --all-targets --locked -- -D warnings`): clean.
+- `cargo test --locked`: 140 passed, 2 ignored (Windows); 141 passed, 2 ignored on Linux (WSL Ubuntu, 2026-10-15).
+- Linux `cargo clippy --all-targets -- -D warnings`, also with `--features sonar`: clean (WSL, 2026-10-15).
+- `cargo report future-incompatibilities --id 1`: "no reports are currently available".
+- `cargo test --locked --features audio`: fails to link on Windows (no libpulse). Expected; not a code bug. CI covers
+  `audio` on Linux for clippy and release build.
 
-The only open code-bug issue is **#173 (Apex 3 TKL RGB not applied)** — now the top priority
-because a concrete protocol reference exists (OpenRGB's 8-zone controller). The remaining work
-is reverse-engineering and accuracy/maintainability cleanup carried over from `TODO.md`.
+## How to work this list
 
-Device-registration issues #211 (Arctis Nova Pro Omni `0x2290`) and #165 (Apex Pro TKL Wireless
-2023 `0x1630`) are **implemented in code** (`src/devices/mod.rs`, `discovery.rs`, with tests).
-They remain open on GitHub only because they have not been closed; verify on hardware / close
-them out separately. Issue **#6 (Arch compile)** was **closed `not_planned` on 2026-05-23** and
-is dropped from this plan.
-
----
-
-## 2. Constraints to preserve
-
-- Read `CLAUDE.md` (same content as `AGENTS.md`) before making code changes.
-- Source-of-truth files when prose drifts:
-  `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `src/devices/hid_reports.rs`.
-- Keep the exact `=` pin on `hidapi` (see `Cargo.toml`) unless the task explicitly requires changing it.
-- Do not loosen the localhost-only GameSense CORS policy.
-- Keep `audio` and `sonar` feature gating independent.
-- Always build HID reports with `HidReportBuilder` / typed helpers — never hand-rolled byte arrays.
-- No `.unwrap()` / `.expect()` in production paths.
-- Do not present placeholder or unverified protocol support as confirmed hardware behavior.
-- Minimal scope: fix what the task asks, no opportunistic refactors.
+- Items marked **[HW]** need the physical device. The owner has an Apex Pro TKL 2023 wired (`0x1628`) on Windows 11
+  with SteelSeries GG installed. Other devices need an outside tester (named per item).
+- Hardware steps: prepare the build and the exact commands, then ask the user to run them and report what the
+  keyboard shows. Do not claim a result the user did not confirm.
+- Stop GG before any `ssgg rgb` test on Windows (kill every `SteelSeries*` process); GG overwrites lighting at ~19 fps.
+- Protocol labels: anything not confirmed on hardware stays `[EXPERIMENTAL]` / `[PLACEHOLDER]`. Promotion needs a
+  commit naming the device model and test date.
+- Run `cargo fmt --all -- --check`, `cargo clippy-ci` and `cargo test --locked` after every code change. `cfg(unix)`
+  code does not compile on Windows; check it in WSL (`CARGO_TARGET_DIR` outside `/mnt/c`).
 
 ---
 
-## 3. Status summary
+## P1. Apex Pro TKL 2023 wired (`0x1628`): finish lighting
 
-### Completed
+Lighting is the only part replayed from `ssgg` so far (one solid red, 2026-10-14).
 
-| Item | Notes |
-|------|-------|
-| Issue #120 — audio hang | 5 s timeout in `src/audio/pulse.rs` |
-| `experimental-apex-2023` feature flag | present in `Cargo.toml` |
-| CLI expansion (HidLogs, TestDevice, VerifyPerformance, Fuzz) | subcommands in `src/main.rs` |
-| Issue #211 — Arctis Nova Pro Omni PID `0x2290` | `ARCTIS_NOVA_PRO_OMNI` const + match arms + test (`src/devices/mod.rs:453`); GitHub issue still open — close after hardware confirmation |
-| Issue #165 — Apex Pro TKL Wireless 2023 PID `0x1630` | `APEX_PRO_TKL_2023_WIRELESS_2` registered in `mod.rs` + `discovery.rs` + tests; GitHub issue still open — close after hardware confirmation |
-| Issue #6 — Arch compile | Closed `not_planned` 2026-05-23 — no action |
+1. **[HW] Lighting test matrix**, GG stopped, `.\target\debug\ssgg.exe`:
+   - `rgb color 00FF00`, `rgb color 0000FF`, `rgb color FFFFFF` (all keys, correct colour?)
+   - `rgb off`
+   - `rgb brightness 50` then `rgb brightness 100` (does the brightness path scale RGB for this model, or send a
+     command the keyboard ignores? GG does software scaling only.)
+   - `rgb effect breathing`, `rgb effect spectrum`, `rgb effect wave` (animated effects need a running loop; note
+     whether the CLI returns immediately)
+   - `rgb perkey ...` (read `PerKeyAction` in `src/cli.rs` for syntax): set W, A, Esc, F1, arrow keys. Esc, F-row and
+     nav cluster are in `WIRED_2023_KEYS` for lighting even though they have no profile slot.
+   - Capture one run with USBPcap to confirm frames still match the GG layout (filter in `AGENTS.md`).
+   Fix whatever fails. If brightness sends a no-op command for `0x1628`, implement it as RGB scaling in the 2023
+   direct path (matches GG behaviour).
+   Code state (2026-10-15): `rgb perkey` on `0x1628` now sends the GG-layout 84-key frame with unlisted keys black
+   (`set_key_colors` in `apex_pro_tkl_2023.rs`); `rgb brightness` still sends the generic `00 22 <level>` output
+   report. Expect per-key to light only the named keys and the rest to go dark (`set-key`, `set-keys`,
+   `set-region` and `test-matrix` all use the frame). Per-key *effects* (`set_per_key_effect`,
+   `trigger_key_reactive`, `apply_per_key_effect_with_brightness`) still reach the generic `0x23` placeholder and
+   `0x09` apply on direct-protocol models; route them through the frame if the effect tests fail.
+2. **Extra output report before each frame.** The existing `initialize()` path sends `00 09 00 ..` as an output report
+   before frames. Code comments say `0x09` makes the controller fall back to its stored profile. Check (by USBPcap
+   during step 1) whether `0x1628` still sends it; if yes, test with it skipped for `0x1628` and keep whichever
+   variant gives a stable frame.
+3. ~~**`experimental-apex-2023` feature path does not match GG.**~~ Done 2026-10-15 (user chose removal): feature
+   flag, `Apex2023DirectCommand` and the unused `smallvec` dependency removed; per-key uses the default frame path.
+4. **[HW, Linux] hidraw path.** `send_feature` on Unix uses `info.path` for `0x1628`. Untested. Needs a Linux machine
+   with the keyboard; record the result in the capture note.
+5. **Status decision (ask the user).** After steps 1-4, ask whether to drop `[EXPERIMENTAL]` for the `0x40` lighting
+   frame on `0x1628`. If yes: update `.claude/rules/experimental-protocol.md`, the code labels and the docs in one
+   commit naming "Apex Pro TKL 2023 (wired, PID 0x1628)" and the test date.
 
-### Open — ranked
+## P2. Apex Pro TKL 2023 wired: actuation and profile (blocked on checksum)
 
-| # | Item | Priority | Phase |
-|---|------|----------|-------|
-| #173 | Apex 3 TKL — commands succeed but RGB does nothing | High | 1 |
-| TODO | Apex Pro TKL 2023 key matrix RE + actuation read-back | Medium | 2 |
-| Done | Protocol docs reconciliation | Low | 3 |
-| Done | Apex Pro capability accuracy cleanup | Low | 4 |
-| — | `src/main.rs` refactor | Low | 5 |
-| Done | Windows pollrate status UX (unsupported-IOCTL messaging) | Low | 6 |
-| TODO | Triage `ssgg_bug_report.json` | Medium | 7 |
-| Done | SignalRGB reverse-engineering research | Low | 8 |
+`ssgg actuation` sends the experimental `0x2D` command; GG instead rewrites the 12,500-byte on-board profile.
+Writing the profile is blocked on the checksum at blob offset 12320..12323.
 
----
+1. ~~**Solve the checksum.**~~ Solved 2026-10-15: STM32 CRC-32 over `0..12320` as LE words, 26/26 blobs match
+   (capture note, "Checksum"). Original notes follow. Inputs: `C:\Users\Ven0m0\gg-capture-artifacts\blobs.bin` (13 blobs) and `blobs3.bin`
+   (19 blobs), 12,500 bytes each. Already ruled out: 10 common CRC32 polynomials (all init/xor/reflection),
+   Adler-32, byte sum, over ranges starting 0/1/2/4/9 and ending 12320/12324/12500. Next approaches, in order:
+   - Static RE of `C:\Program Files\SteelSeries\GG\apps\engine\SteelSeriesEngine.exe` (Go) and `SSEdevice.dll`:
+     find the profile-serialize code (search strings near "profile", "checksum", "crc", table constants such as
+     CRC polynomials or hash IVs) and read the function directly.
+   - Fit the function from data: XOR pairs of blobs that differ by one byte to test linearity (linear over GF(2)
+     means a CRC-like function with a non-standard polynomial or range).
+   - Ask the reporter of issue #280 for access to their decrypted `.edevice` files (their linked repo returns 404).
+2. **Partly done 2026-10-15:** `keyboards/apex_pro_tkl_2023_profile.rs` has the checksum, `set_actuation` (rejects
+   unknown mm values and keys without a slot) and the 25-chunk split, all unit-tested. Not wired to any command:
+   without a read-back (step 3) there is no current blob to modify. Original task: implement a profile read-modify-write for actuation on `0x1628` (chunk
+   header `03 01 80 | len | offset | 00 00`, 25 chunks), using `WIRED_2023_PROFILE_SLOTS` and the four known raw
+   actuation values. Unknown mm values must be rejected, not interpolated, until more points are captured. Get
+   explicit user approval before the first write to the keyboard.
+3. **Capture GG startup** (USBPcap started before launching GG) to get the init sequence and see whether GG reads
+   the profile back. A read-back command would allow safe read-modify-write and replaces the old
+   "discover an actuation read-back command" task (`src/bin/discover_actuation.rs`).
+4. **Decode remaining commands** while capturing: `b1`, `b2`, `34`, `38 66`, `38 67`; the profile tables at 1080,
+   1224, 1590; where `second_actuation_thresholds` is stored. Record findings in the capture note.
 
-## 4. Phase 1 — Apex 3 TKL RGB not applied (Issue #173) · High
+## P3. Apex 3 TKL (`0x1622`) RGB not applied (issues #173, #257)
 
-### Context
+The code already sends `0x21` with selector `0xFF` and `R G B` per zone (OpenRGB 8-zone layout). Open differences:
 
-`ssgg rgb solid #ff0000` on an Apex 3 TKL (PID `0x1622`) reports success but nothing changes;
-multiple users confirm (`#173`), and runtime logs `WARN No key mapping available for product ID
-0x1622 - per-key RGB disabled`. The Apex 3 TKL is a **zone** keyboard (8–10 zones), not per-key,
-so the missing key map is expected — the real bug is the zone-color command path.
+1. ~~**Zone count.**~~ Done 2026-10-15 (Underglow zone dropped from the invented 9-zone map). Code used 9 (`zone_count_for_product_id`, `src/devices/mod.rs`; `zone_mapping.rs` around line 313).
+   SteelSeries advertises 8 zones and OpenRGB models 8. Change `APEX_3_TKL` to 8 zones in both places and update
+   the tests that assert the count.
+2. ~~**Brightness byte.**~~ Done 2026-10-15: `Apex8ZoneBrightnessCommand` (`00 23 <0x00-0x10>`), used by
+   `Apex3Tkl::set_brightness`, `[EXPERIMENTAL]`. Code has `CommandCode::Brightness = 0x22`; OpenRGB's 8-zone controller uses `0x22` = rainbow
+   wave and `0x23` = brightness (`0x00`-`0x10`). Do not change globally; if needed, add an Apex 3 TKL-specific
+   brightness via `HidReportBuilder`, labelled `[EXPERIMENTAL]`.
+3. **[HW, outside tester]** `yann-morin-1998` offered to test on #257. Push a branch, post exact commands
+   (`ssgg -d rgb color FF0000`, `ssgg rgb off`, `ssgg rgb brightness 50`) and ask for debug logs. Confirm with the
+   user before posting on GitHub.
+4. #257 duplicates #173; close #257 in favour of #173 once the test result is in (ask the user first).
 
-`Apex3Tkl` (`src/devices/keyboards/apex.rs`) delegates `set_color` / `set_zone_colors` to
-`GenericKeyboard`, and its own `CMD_RGB_EFFECT = 0x23` (line 24) was written speculatively.
+## P4. Apex Pro original (`0x1610`) RGB does nothing on Linux (issue #283)
 
-### Concrete lead (OpenRGB 8-zone protocol)
+Reporter (NixOS) sees successful HID writes but no change. `0x1610` uses the generic 1-zone path.
 
-Reference: OpenRGB `SteelSeriesApex8ZoneController.h` (linked by a user in #173, owner acked
-2026-06-15). 65-byte report (report ID byte + 64 payload):
+Done 2026-10-15 (steps 1-2, code for 3): ssgg sent a 65-byte `0x21` output report; OpenRGB uses a 643-byte feature
+report `00 3A N [usage R G B] xN` on interface 1 with no init. `0x1610` now goes through `ApexProTkl2023` with packet
+ID `0x3A`, the 112-key table, and Unix hidraw interface 1. Remaining: step 3's tester request (ask first). Which
+collection Windows discovery picks for `0x1610` is unknown.
 
-| Command | Byte 0 | Layout |
-|---------|--------|--------|
-| Set zone colors | `0x21` | byte 1 = LED bitmask (`0xFF` = all 8), bytes 2–25 = `R G B` × 8 zones, rest zero-padded |
-| Rainbow wave | `0x22` | byte 1 = `0xFF` |
-| Brightness | `0x23` | byte 1 = `0x00`–`0x10` (multiplier, persists across Mod+F11/F12) |
+1. Check which interface `ssgg` writes to for `0x1610` (log shows interfaces 0-4 enumerated) and which report the
+   generic path sends.
+2. Compare with OpenRGB's SteelSeries Apex controller and `FrankGrimm/apex7tkl_linux` / `AstroSnail/apexctl` for the
+   Apex Pro report format and interface. Record the source for any byte layout you adopt.
+3. Implement behind an `[EXPERIMENTAL]` label, then ask the reporter to test (confirm with the user before posting).
 
-**Likely root cause (as originally drafted):** the current code uses `0x23` (brightness in this
-dialect) to push color, so the firmware applies a brightness write and ignores the intended
-color. The correct set-color command is **`0x21`** with the per-zone RGB layout above.
+## P5. Device registration (issue #276)
 
-### Research update (2026-08-18) — premise above is stale, verified against current source
+Done 2026-10-15 for `0x22A1` and `0x0616` (`is_detect_only` makes `open_keyboard` / `open_headset` refuse them;
+`first_device_of_type` skips them). Mouse skipped by user decision. Original task: register name and device type only, no protocol claims: `0x1858` Aerox 9 Wireless (mouse), `0x22A1` Arctis Nova 7
+(headset), `0x0616` Apex M750 (keyboard). Use the `new-device` skill. Check first whether a mouse `DeviceType`
+exists; if not, ask the user before adding one. Unknown devices must stay detect-only (no RGB writes).
 
-Checked `src/devices/hid_reports.rs`, `src/devices/keyboards/mod.rs`, `src/devices/keyboards/apex.rs`,
-`src/devices/discovery.rs` against the OpenRGB lead. The `0x23`-overwrites-color theory does **not**
-match current code:
+## P6. GitHub close-out (ask before any GitHub write)
 
-- `GenericKeyboard::set_color` / `set_zone_colors` (`keyboards/mod.rs:521-540`) already call
-  `RgbZoneCommand::new_all_zones` / `new_specific_zone`, whose `command_code()` is
-  `CommandCode::RgbControl = 0x21` (`hid_reports.rs:35,173-174`). `Apex3Tkl` delegates `set_color`/
-  `set_zone_colors` straight to this inner `GenericKeyboard` (`apex.rs:118-125`) — so the live color
-  path is already `0x21`, not `0x23`.
-- `RgbZoneCommand::serialize` (`hid_reports.rs:178-215`) writes `[report_id=0x00][cmd=0x21]
-  [zone_selector][R G B]×N` — byte-for-byte the OpenRGB 8-zone layout the plan cites (`zone_selector
-  = 0xFF` for all-zones, from `send_zone_buffer_async`).
-- `Apex3Tkl::CMD_RGB_EFFECT = 0x23` (`apex.rs:24`) is real but dead on this path: it's only used by
-  `set_rgb_effect()`, an unused experimental method never called from `set_color`/`set_zone_colors`.
-- Device routing is correct: PID `0x1622` → `Apex3Tkl::new(generic_keyboard)`
-  (`discovery.rs:449`), so the wrapper in question is the one actually instantiated.
+- #211 (Arctis Nova Pro Omni `0x2290`) and #165 (Apex Pro TKL Wireless 2023 `0x1630`): registered in code with
+  tests. Ask the reporters to confirm on hardware, then close.
+- #280: repo link is 404. No longer needed for the checksum; decrypted `.edevice` files would still help with P2.4.
+- #277 (Sonar deeplink config import): format researched 2026-10-15, see `database-schemas.md` ("Shared config
+  links"). Link = base64 CDN URL to the config JSON. Still unknown: how to create a config in Sonar (body of
+  `POST /configs` or the `retrieveFromUrlHash` hash form). Scope after that is known.
 
-**So issue #173 is not explained by the `0x21` vs `0x23` mixup** — that part of the protocol was
-already fixed (commit history shows `hid_reports.rs` and this call path are new since the plan was
-drafted; PLAN.md's status table was not updated to match). Two things from the OpenRGB lead are
-still genuinely open, and are the real remaining candidates:
+## P7. Maintenance (low priority)
 
-1. **Zone count mismatch (still unresolved, same as Open Question 1 below):** code sends 9 zones
-   (`zone_count_for_product_id` → `APEX_3_TKL => 9`, `discovery.rs mod.rs:621`); OpenRGB models this
-   family as 8. `MAX_RGB_ZONES = 12` so the 9th zone doesn't overflow the buffer, but if firmware
-   expects exactly 8 `RGB` triplets at fixed offsets, byte 26 onward may be read as garbage/next-field
-   by the firmware rather than ignored.
-2. **Command-code table mismatch vs the OpenRGB reference itself:** code's
-   `CommandCode::Brightness = 0x22` (`hid_reports.rs:39-40`), but the OpenRGB table this plan quotes
-   has `0x22 = rainbow wave` and `0x23 = brightness`. Nothing in the current color path sends a
-   brightness/apply write automatically, so this mismatch isn't yet proven to matter — but if `0x21`
-   alone doesn't light the keyboard on hardware, sending `CommandCode::Brightness` (currently 0x22)
-   is untested against this specific 8-zone family and may be the wrong byte per OpenRGB's numbering.
+- CodeQL default setup fails on every push: its `c-cpp` job finds no sources (the only C file,
+  `mock_udev/include/libudev.h`, is deleted in the pending commit). The REST API cannot set a language list that
+  includes Rust, so untick C/C++ in Settings > Code security > CodeQL (manual, 2026-10-15).
+- Move the hand-built direct frame (`build_direct_frame`) and `0x4B` init buffer in `apex_pro_tkl_2023.rs` to typed
+  `HidCommand`s in `hid_reports.rs` (hard constraint 1; pre-existing, found in review 2026-10-15).
 
-Given the code already matches the primary OpenRGB lead, **Phase 1's remaining blocker is hardware
-confirmation, not further code changes** — retest `ssgg rgb solid` on real Apex 3 TKL hardware first;
-only chase zone-count/brightness-byte changes if that retest still shows no LED response.
-
-### Primary files
-
-- `src/devices/keyboards/apex.rs` — `Apex3Tkl` (`CMD_RGB_EFFECT`, color delegation lines 118–146)
-- `src/devices/keyboards/mod.rs` — `GenericKeyboard::set_color` / `set_zone_colors`
-- `src/devices/hid_reports.rs` — add/confirm the `0x21` zone-color command code via `HidReportBuilder`
-- `src/devices/zone_mapping.rs:311` — `APEX_3_TKL` zone mapping (currently registered)
-
-### Tasks
-
-1. ~~Reference the existing typed command code for the 8-zone set-color (CommandCode::RgbControl,
-   0x21) in hid_reports.rs; build the report with HidReportBuilder~~ — **done**: `RgbZoneCommand`
-   already uses `CommandCode::RgbControl = 0x21` and is built via `HidReportBuilder`
-   (`hid_reports.rs:141-215`).
-2. ~~Override `set_color` and `set_zone_colors` in `Apex3Tkl`~~ — **not needed**: `Apex3Tkl` delegates
-   to `GenericKeyboard::set_color`/`set_zone_colors`, which already send `0x21` with bitmask `0xFF`
-   and the `R G B`×N layout (`keyboards/mod.rs:521-540`). No separate override required unless
-   hardware retest shows the delegated path is wrong for this SKU specifically.
-3. **Still open:** reconcile the zone count (code sends 9 via `zone_count_for_product_id`, OpenRGB
-   models 8) — see Research update above and Open Questions §10.1.
-4. Confirm whether a separate `0x23` brightness write is needed before/after color for the LEDs
-   to be visible at non-zero brightness.
-5. Mark anything still unverified with an explicit `experimental` doc comment.
-
-### Validation
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
-# On hardware (Apex 3 TKL, PID 0x1622):
-ssgg rgb solid "#ff0000"   # red should appear
-ssgg rgb solid "#000000"   # off
-```
-
-### Success criteria
-
-- `ssgg rgb solid` visibly changes the keyboard on real hardware.
-- `GenericKeyboard` behavior for other keyboards is unchanged.
-- `cargo test --locked` passes.
-
-### Complexity
-
-⭐⭐ Medium — protocol now documented; small code change, but **final confirmation needs the
-Apex 3 TKL hardware** (the OpenRGB layout is a strong lead, not a guarantee for this SKU).
+- `src/main.rs` is still ~2,000 lines after `cli.rs` and `daemon.rs` were split out. Extract the remaining
+  low-churn `cmd_*` families into modules without changing clap behaviour, output or feature gating. Do this only
+  when no P1-P5 work is in flight.
+- ~~Code comments that contradict the docs~~ Done 2026-10-15 (the `0x40` doc moved to `CommandCode`, `apex.rs` zone
+  comment, duplicated `send_feature` doc, `sonar.rs` doc link). Original list:
+  - `src/devices/hid_reports.rs` (~lines 21-22, 682-690) calls `Apex2023DirectCommand` "Confirmed"; the rule file
+    lists `0x40` as experimental. Relabel `[EXPERIMENTAL]`.
+  - `src/devices/keyboards/mod.rs` (~lines 397-398): duplicated, stale doc line about "interface 3 for wireless".
+  - `src/devices/keyboards/apex.rs:17` says "10-zone"; `ZONE_COUNT = 9` (and see P3.1 for 8).
+  - `src/audio/sonar.rs:8` links `docs/development/SONAR_PROTOCOL.md`, which does not exist.
+- ~~`apex.rs` raw byte arrays~~ Done 2026-10-15: all four uncalled helpers (reactive, colour shift, `0x23` effect,
+  `0x24` OSD) deleted. Original note: `src/devices/keyboards/apex.rs` (~lines 36-55) builds raw byte arrays for reactive / colour-shift, which breaks
+  hard constraint 1. Move them to typed helpers in `hid_reports.rs` (both commands have no callers outside
+  `apex.rs`; check whether they can be deleted instead).
 
 ---
 
-## 5. Phase 2 — Apex Pro TKL 2023 key matrix RE + actuation read-back (TODO) · Medium
-
-### Context
-
-All 87 `KeyId → KeyAddress` mappings for `ApexProTkl2023` in `src/devices/key_mapping.rs` are
-placeholder data; runtime falls back to `simulate_per_key_with_zones()`. Real per-key RGB and an
-actuation read-back command remain unverified. ANSI/ISO layout and unsupported-key handling also
-need hardware validation. This is the "Continue Apex Pro TKL 2023 protocol and RGB work" backlog
-item.
-
-### Research methods (in order)
-
-1. Binary RE of `SteelSeriesGG107.exe` for key-address lookup tables.
-2. USB capture (Wireshark/USBPcap) while SteelSeries GG sets per-key colors; decode byte offsets.
-3. Community sources: `AstroSnail/apexctl`, `FrankGrimm/apex7tkl_linux`, `not-jan/apex-tux`.
-
-### Primary files
-
-- `src/devices/key_mapping.rs` — `KeyMappingDatabase::new()` for `ApexProTkl2023`
-- `src/devices/keyboards/apex_pro_tkl_2023.rs`
-- `src/bin/discover_actuation.rs` — probe actuation firmware commands
-- `src/bin/verify_key_mapping.rs` — validate mappings on hardware
-- `docs/development/protocol-keyboard.md` — per-key status (Key Addressing section)
-
-### Tasks
-
-1. Extract verified HID codes / matrix addresses for the keys (at least alphanumeric + modifiers).
-2. Replace placeholder `KeyAddress::new(...)` calls with verified values.
-3. Replace the speculative `0x23` per-key path once the real command is confirmed; keep
-   `CommandCode::PerKeyRgb (0x23)` and `Apex2023Direct (0x40)` labeled experimental until then.
-4. Use `discover_actuation.rs` to find an actuation read-back command if firmware exposes one.
-5. Validate ANSI/ISO differences and unsupported-key handling on hardware.
-6. Update `docs/development/protocol-keyboard.md` to reflect verified vs. still-placeholder keys.
-
-### Validation
-
-```bash
-cargo build  --locked --features experimental-apex-2023
-cargo test   --locked --features experimental-apex-2023
-```
-
-### Complexity
-
-⭐⭐⭐ High — gated on RE/capture; code change is small once addresses are known.
-
----
-
-## 6. Phase 3 — Protocol docs reconciliation (TODO) · Low
-
-### Objective
-
-Make `docs/development/` safe to follow: separate confirmed behavior, placeholder code, and
-speculation; remove dead references.
-
-### Primary files
-
-- `docs/development/protocol-keyboard.md`, `devices.md`, `database-schemas.md`
-
-### Tasks
-
-1. Confirm every helper-binary reference still resolves (`discover_actuation`, `verify_key_mapping`,
-   `benchmark_rgb_alloc`, `benchmark_fragment`, `sonar_control`); fix any dangling ones.
-2. Add `> ⚠️ UNVERIFIED` callouts wherever a command code or address is a placeholder.
-3. Cross-link the OpenRGB 8-zone reference (Phase 1) into the Apex 3 TKL notes.
-
-### Success criteria
-
-No dev doc points contributors at a nonexistent tool; confirmed vs. speculative is clearly marked.
-
-### Complexity
-
-⭐ Low — docs only.
-
-### Resolution (2026-08-18)
-
-All three tasks were already satisfied by the current `docs/development/` files — no doc edits
-were needed. Only PLAN.md itself was stale: it referenced nonexistent filenames
-`APEX_PRO_PROTOCOL.md`, `PROTOCOL_RESEARCH.md`, `KEY_MAPPING_RESEARCH.md`; the real files are
-`protocol-keyboard.md`, `devices.md`, `database-schemas.md`. References fixed in §5 and §6 above.
-Helper-binary references (`discover_actuation.rs`, `verify_key_mapping.rs`, `benchmark_rgb_alloc.rs`,
-`benchmark_fragment.rs`, `sonar_control.rs`) all resolve to real files in `src/bin/`. `⚠️ UNVERIFIED`
-callouts and the OpenRGB cross-link already exist in `protocol-keyboard.md`.
-
-**Flag for follow-up (not resolved here):** `devices.md`/`protocol-keyboard.md` mark `0x40`
-(`Apex2023Direct`) and `0x2D` (`ActuationControl`) as `✅ Confirmed` against connected hardware
-(Apex Pro TKL 2023, dated 2026-05-26/27), while `.claude/rules/experimental-protocol.md` and
-`CLAUDE.md`'s active backlog still list both as Experimental/unconfirmed. This is a status-promotion
-decision the rule file requires an explicit commit for (device model + date) — left to the user
-rather than auto-promoted here.
-
----
-
-## 7. Phase 4 — Apex Pro capability accuracy cleanup (TODO) · Low
-
-### Objective
-
-Ensure placeholder per-key support is never presented as verified. Accuracy/maintainability only —
-no runtime behavior change.
-
-### Primary files
-
-- `src/devices/hid_reports.rs`, `src/devices/key_mapping.rs`,
-  `src/devices/keyboards/mod.rs`, `src/devices/keyboards/apex_pro_tkl_2023.rs`
-
-### Tasks
-
-1. Find every place placeholder command codes (`PerKeyRgb (0x23)`, `Apex2023Direct (0x40)`,
-   `ActuationControl (0x2D)`) are described/logged without an `⚠️ experimental` qualifier.
-2. Add qualifiers in doc comments, log messages, or CLI help text.
-3. Do not change runtime behavior.
-
-### Validation
-
-```bash
-cargo test --locked
-cargo test --locked --features experimental-apex-2023
-```
-
-### Complexity
-
-⭐ Low — comments/strings only.
-
-### Resolution (2026-08-18)
-
-Already satisfied — no code change needed. `CommandCode::PerKeyRgb`, `Apex2023Direct`, and
-`ActuationControl` in `src/devices/hid_reports.rs` all carry doc-comment qualifiers (`placeholder`,
-`experimental`, or `EXPERIMENTAL`) and their `Display` impl appends `_EXPERIMENTAL` to the printed
-name; `apex_pro_tkl_2023.rs` gates every 2023-direct code path behind the `experimental-apex-2023`
-feature and names its methods `experimental_*`. No unlabeled placeholder references found.
-
----
-
-## 8. Phase 5 — `src/main.rs` refactor (deferred) · Low
-
-### Objective
-
-Improve maintainability of the CLI dispatch layer without behavior change.
-
-### Tasks
-
-1. Extract low-churn command families into focused modules.
-2. Preserve clap behavior, output, and feature gating exactly.
-3. Start only after Phases 1–4 are stable.
-
-### Validation
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
-```
-
-### Complexity
-
-⭐⭐⭐ High — large surface; lowest priority.
-
----
-
-## 8b. Phase 6 — Windows pollrate status UX (TODO) · Low
-
-### Context
-
-User report: `ssgg pollrate status` on Windows prints, for both mouse and keyboard, "Error:
-Device communication error: Poll rate query is not supported by this device's HID driver. USB HID
-devices (including SteelSeries keyboards) do not expose poll rate via the Windows HID class IOCTL
-interface." This is **already the intended, documented behavior** —
-`windows_hid_poll_ioctl` (`src/pollrate.rs`) maps `ERROR_INVALID_FUNCTION` (raw OS error `1`) from
-`IOCTL_HID_GET_POLL_FREQUENCY_MSEC` to this explanatory `Error::DeviceCommunication`, because
-`hidusb.sys` never implements that IOCTL (only PS/2 `kbdhid.sys` does). Not a protocol bug.
-
-### Primary files
-
-- `src/pollrate.rs` — `windows_hid_poll_ioctl`, `get_poll_rate`
-- `src/main.rs` — pollrate status command output formatting
-
-### Tasks
-
-1. Decide UX: keep as a clearly labeled "unsupported on this driver" notice (not phrased as an
-   `Error:`), or suppress entirely for devices known to lack the IOCTL.
-2. If changed, keep the explanation text — it is accurate and helps users file correct reports.
-3. No change to `get_poll_rate` / `set_poll_rate` return semantics without a task specifically
-   requesting it.
-
-### Complexity
-
-⭐ Low — messaging/formatting only; root cause already understood and documented in code.
-
-### Resolution (2026-08-18)
-
-Chose "keep as a labeled notice" (not suppress) per task 1, since the explanation text is accurate
-and helps users file correct reports (task 2). `cmd_pollrate`'s `Status` arm in `src/main.rs` now
-detects the specific "not supported by this device's HID driver" message and prints
-`  Mouse/Keyboard: unsupported on this driver — <detail>` instead of `Error: <detail>`; any other
-`DeviceCommunication` error still prints as `Error:`. `get_poll_rate`/`set_poll_rate` return
-semantics unchanged (task 3). Verified: `cargo build --locked`, `cargo fmt --all -- --check`,
-`cargo test --locked --lib pollrate` (4 passed) all clean.
-
----
-
-## 8c. Phase 7 — Triage `ssgg_bug_report.json` (TODO) · Medium
-
-### Context
-
-TODO.md references a `ssgg_bug_report.json` file to read; it is not present in this repository
-(not tracked, not attached to an issue at time of writing).
-
-### Tasks
-
-1. Locate the file (ask the reporting user, or check GitHub issue attachments) before acting.
-2. Once available, extract the failure signature and cross-reference against `src/error.rs` and
-   the relevant device/module to see if it matches a known issue (e.g. #173, pollrate) or is new.
-3. File or update a GitHub issue with the findings; do not speculate about its contents here.
-
-### Complexity
-
-⭐⭐ Medium — blocked on obtaining the file; triage effort depends on its contents.
-
----
-
-## 8d. Phase 8 — SignalRGB reverse-engineering research (TODO) · Low
-
-### Context
-
-TODO.md asks whether SignalRGB (`https://signalrgb.com`, docs at `https://docs.signalrgb.com`)
-can be reverse-engineered for ideas on driving SteelSeries keyboard lighting on Windows 11.
-Research-only; no reusable code identified yet.
-
-### Tasks
-
-1. Read `docs.signalrgb.com` for any public plugin/SDK API relevant to third-party device control.
-2. Determine whether SignalRGB implements its own SteelSeries protocol or delegates to SteelSeries
-   Engine/GG — if the latter, it offers no new protocol information for Phase 1/2.
-3. Record findings in `docs/development/` only if concretely reusable; otherwise fold a one-line
-   conclusion back into TODO.md's Deferred research section.
-
-### Complexity
-
-⭐ Low — reading/triage; no code change expected unless a concrete protocol lead surfaces.
-
-### Resolution (2026-08-18)
-
-Read `docs.signalrgb.com`'s developer overview, plugins index, and SteelSeries brand-specific
-troubleshooting page. SignalRGB does **not** delegate to SteelSeries GG/Engine — it controls devices
-directly through its own JS USB/HID plugin framework, and its own docs instruct users to disable GG's
-Prism engine to stop it from fighting SignalRGB for control of the same device. No SteelSeries-specific
-protocol bytes were in the public docs (would need an actual plugin's source, not the docs site); its
-plugin-dev tutorial documents a USB-capture-to-plugin workflow that matches the approach already
-planned for Phase 2, confirming methodology but adding no new protocol lead. No `docs/development/`
-change was warranted (task 3's bar); conclusion recorded in TODO.md's Deferred research section
-instead.
-
----
-
-## 9. Dependencies
-
-```
-Phase 1 (Apex 3 TKL RGB)  ── protocol known; needs hardware to confirm ──┐
-Phase 2 (Key matrix RE)   ── needs RE/USB capture session ───────────────┤
-Phase 3 (Docs reconcile)  ── unblocked ──────────────────────────────────┤──► Phase 5 (main.rs)
-Phase 4 (Capability acc.) ── unblocked ──────────────────────────────────┘
-```
-
-| Phase | Blocked by | Reason |
-|-------|------------|--------|
-| 1 | Apex 3 TKL hardware (confirmation only) | OpenRGB layout is a lead, not SKU-confirmed |
-| 2 | RE / USB capture | Key addresses + actuation command unknown |
-| 3, 4 | Nothing | Documentation / accuracy only |
-| 5 | 1–4 stable | Refactor risk |
-| 6 | Nothing | UX-only, root cause already known |
-| 7 | Obtaining `ssgg_bug_report.json` | File not present in repo |
-| 8 | Nothing | Research/reading only |
-
----
-
-## 10. Open questions / blockers
-
-1. **Apex 3 TKL zone count:** code registers **9** zones (`mod.rs:581`, `zone_mapping.rs:311`)
-   but OpenRGB models it as **8**. Confirm the true count before mapping `set_zone_colors`.
-2. **Report ID / framing — resolved by code read (2026-08-18):** `HidDeviceType::Keyboard::
-   includes_report_id()` is `true`, so `RgbZoneCommand::serialize` writes a leading `0x00`
-   report-ID byte then `[0x21][zone_selector][R G B]×N`, matching the 65-byte (1+64) OpenRGB
-   report exactly. No code change needed here; still worth confirming the write actually reaches
-   the device on the hidraw path during hardware retest.
-3. **Brightness coupling:** still open. No brightness/apply write is sent automatically by
-   `set_color`/`set_zone_colors` today. Also note the command-code table mismatch found in the
-   research update above: code's `CommandCode::Brightness = 0x22`, but OpenRGB's table (quoted in
-   §4) has `0x22 = rainbow wave` / `0x23 = brightness` — untested which byte this SKU actually
-   wants for brightness, if a brightness write turns out to be required at all.
-4. **Hardware access:** Phases 1 and 2 both need the physical devices for final confirmation; the
-   owner has the Apex Pro TKL 2023 and acked checking the OpenRGB reference for #173 (2026-06-15).
-5. **Close-out:** #211 and #165 are implemented but still open on GitHub — confirm on hardware and
-   close, or leave open pending user reports.
-
----
-
-## 11. Deferred research (reference only)
-
-- **Open-G-Hub** (`https://github.com/Sharper-Flow/Open-G-Hub`) — defer unless a concrete blocker
-  suggests reusable logic.
-- Apex protocol: `AstroSnail/apexctl`, `FrankGrimm/apex7tkl_linux`, `not-jan/apex-tux`;
-  OpenRGB `SteelSeriesApex8ZoneController` (primary lead for Phase 1).
-- Sonar/audio (when Sonar work resumes): `PrzemekkkYT/GGSonarRev`, `wex/sonar-rev`,
-  `Mark7888/steelseries-sonar-py`, `codeberg.org/Birbwell/linuxmix`, `Dymstro/nova-chatmix-linux`.
-- Research-only: `flozz/rivalcfg`, `llMBQll/OmniLED`.
-
----
-
-## 12. Suggested next move
-
-Start **Phase 1** — it is the only open code bug, multi-user confirmed, and now has a documented
-protocol. Land the `0x21` zone-color path behind hardware confirmation; **Phases 3, 4, 6, 8** are
-low-effort, fully unblocked fillers if hardware is unavailable. **Phase 7** needs the bug-report
-file obtained first.
+## Done or dropped (do not redo)
+
+- Issue #120 audio hang (5 s timeout in `src/audio/pulse.rs`).
+- Protocol-docs reconciliation, capability-label cleanup, Windows pollrate "unsupported on this driver" notice,
+  SignalRGB research (it drives devices directly via its own plugins; no SteelSeries bytes in public docs).
+- Apex Pro TKL 2023 wired: GG capture, 84-key lighting table, 645-byte frame, interface-1 path, profile slot map
+  (`WIRED_2023_PROFILE_SLOTS`), GG-engine warning. Committed in `f430380`.
+- Old TODO items: clippy-ci / future-incompat errors (resolved, see Baseline); `ssgg_bug_report.json` triage
+  (dropped: the file was never provided); issue #6 Arch compile (closed `not_planned`).
+- `docs/development/` consolidation (2026-10-15): capture-note "Transport" section matches the 645-byte /
+  `info.path` code for `0x1628`; `0x40` and `0x2D` relabelled `[EXPERIMENTAL]` with a link to the capture note;
+  `protocol-keyboard.md` merged into `devices.md`; index in `docs/development/README.md`.
+- Old Phase 2 task "replace placeholder `KeyAddress` values for the 2023 model": superseded for `0x1628` by the
+  HID-usage table from the GG capture.
+
+## Reference projects
+
+- Apex RGB: OpenRGB `SteelSeriesApex8ZoneController`
+  (https://gitlab.com/CalcProgrammer1/OpenRGB/-/blob/master/Controllers/SteelSeriesController/SteelSeriesApex8ZoneController/SteelSeriesApex8ZoneController.h),
+  https://github.com/AstroSnail/apexctl, https://github.com/FrankGrimm/apex7tkl_linux,
+  https://github.com/not-jan/apex-tux
+- Sonar / audio: https://github.com/PrzemekkkYT/GGSonarRev, https://github.com/wex/sonar-rev,
+  https://github.com/Mark7888/steelseries-sonar-py, https://codeberg.org/Birbwell/linuxmix,
+  https://github.com/Dymstro/nova-chatmix-linux
+- Research only: https://github.com/flozz/rivalcfg, https://github.com/llMBQll/OmniLED,
+  https://github.com/Sharper-Flow/Open-G-Hub

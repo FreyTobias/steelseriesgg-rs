@@ -2,9 +2,9 @@
 
 Status: **[EXPERIMENTAL]**. Everything below was read from USB captures of the official SteelSeries GG
 (Windows) talking to a real Apex Pro TKL (VID 0x1038, PID 0x1628, firmware reported as `1.19.7`),
-captured with USBPcap 1.5.4.0 on 2026-10-14. The bytes are observed GG traffic. None of it has been
-replayed from this project yet, so nothing here is "confirmed" in the sense of
-`.claude/rules/experimental-protocol.md`.
+captured with USBPcap 1.5.4.0 on 2026-10-14. The bytes are observed GG traffic. Only one solid-colour
+lighting frame has been replayed from this project (see open question 3), so nothing here is "confirmed"
+in the sense of `.claude/rules/experimental-protocol.md`.
 
 ## Transport
 
@@ -16,10 +16,12 @@ transfers (`bmRequestType 0x21`, `bRequest 9`). Replies came back on interrupt I
 | Feature report, ID 0 | `0x0300` | 644 | per-key lighting, on-board profile upload |
 | Output report, ID 0 | `0x0200` | 64 | commands and polls |
 
-The 644 is the on-wire length; it excludes the report-ID byte. The code currently sends
-`APEX_2023_PACKET_LENGTH = 643` including the ID, which is 642 on the wire on Linux hidraw. This model
-should be tested with 644 on the wire. Note the Unix path resolves hidraw interface 3
-(`find_hidraw_for_interface(.., 3)`), which is the wireless layout; the wired model used interface 1.
+The 644 is the on-wire length; it excludes the report-ID byte. For `0x1628` the code builds a
+`WIRED_2023_PACKET_LENGTH = 645` buffer (report-ID byte + 644 wire bytes) in `apex_pro_tkl_2023.rs`. On
+Unix, `GenericKeyboard::send_feature` (`keyboards/mod.rs`) writes to `info.path` for this model, the
+interface-1 control collection discovery selected. Other 2023/2024 models (Gen 3, wireless) still use
+`APEX_2023_PACKET_LENGTH = 643` and resolve hidraw interface 3 (`find_hidraw_for_interface(.., 3)`).
+The Linux hidraw path for `0x1628` is untested.
 
 ## Per-key lighting (feature report, command 0x40)
 
@@ -38,6 +40,9 @@ wire offset  0      1      2 + 4*i ...        338 .. 643
 - Brightness 0 in GG produced all-zero RGB in these frames (software scaling). A mid-level
   brightness was not distinguishable in this capture.
 - The `0x4B` init report used by the code was not seen: GG's startup precedes the capture.
+- `ssgg rgb color` and `ssgg rgb perkey` both build this frame as a feature report. Per-key sends all 84
+  entries with unlisted keys black, since no read-back of the current colours is known. The old
+  `experimental-apex-2023` path (65-byte output report) was removed on 2026-10-15.
 
 ## On-board profile (feature report, header `03 01 80`)
 
@@ -97,11 +102,22 @@ row of `device_id` 242 (`devices.name` = `apex_pro_tkl_2022`, product 0x1628). K
 with GG stopped (Python: `sqlite3.connect("file:<path>?mode=ro", uri=True)`). The list order is by HID,
 not by slot, so it does not give the slot map by itself; keys with unique values in it (ISO/JIS keys
 default to `h` 47 / `l` 42; Key Guard keys) anchor slots.
-- Four bytes at blob offset 12320..12323 change with every edit and are deterministic for the
-  content. They look like a checksum. No match was found for 10 common 32-bit CRC polynomials
-  (all init, xor-out and reflection combinations), Adler-32 or a byte sum, over blob ranges
-  starting at 0, 1, 2, 4 or 9 and ending at 12320, 12324 or 12500. It may be a keyed or non-CRC hash.
-  **Do not write the profile blob until this is solved.**
+### Checksum (solved 2026-10-15)
+
+The little-endian u32 at blob offset 12320..12323 is the STM32 hardware CRC-32 over blob bytes
+`0..12320`: polynomial `0x04C11DB7`, init `0xFFFFFFFF`, no input/output reflection, no final XOR, with the
+data read as little-endian 32-bit words and each word fed MSB first (each 4-byte group byte-reversed
+before a plain CRC-32/MPEG-2). It matches all 26 captured blobs (8 distinct). Plain byte-order
+CRC-32/MPEG-2 does not match, which is why the earlier search missed it.
+
+How it was found: the checksum deltas were GF(2)-linear in the data deltas (offset 1462 values 00/01/02),
+and a reveng-style GCD over diff pairs gave exactly `0x104C11DB7` once the 4-byte word swap was applied.
+Caveat: only offsets 1100, 1113, 1170, 1183, 1462 and 2700 varied in the captures.
+
+Code: `src/devices/keyboards/apex_pro_tkl_2023_profile.rs` (`profile_checksum`, `seal_profile`,
+`set_actuation`, `profile_chunk_reports`). Nothing sends a profile: no read-back command is known, so a
+write would replace every other on-board setting. Recompute the CRC on a fresh capture with edits past
+offset 2700 before the first write.
 
 ## Output reports (64 bytes)
 
@@ -115,7 +131,7 @@ Meaning of `b1`, `b2`, `34` and the `38 67` payload is unknown.
 
 ## Open questions
 
-1. Checksum at blob offset 12320.
+1. ~~Checksum at blob offset 12320.~~ Solved 2026-10-15 (see "Checksum").
 2. ~~Full key-to-offset map.~~ Decoded 2026-10-14 (see "Slot map"); 20 slots captured, 9 set-matched,
    the rest by row order. Still unknown: the tables at 1080, 1224 and 1590, and where
    `second_actuation_thresholds` is stored.

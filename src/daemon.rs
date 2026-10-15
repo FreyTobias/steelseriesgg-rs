@@ -67,6 +67,11 @@ impl DaemonState {
     ) -> Result<()> {
         let serial = info.serial_number.clone().unwrap_or_else(|| "unknown".to_string());
 
+        if steelseries_gg::devices::is_detect_only(info.product_id) {
+            info!("Hot-plug: {} detected (detect-only, not opened)", info.name);
+            return Ok(());
+        }
+
         match info.device_type {
             DeviceType::Keyboard => {
                 info!("Hot-plug: Adding keyboard: {} ({})", info.name, fingerprint.to_id());

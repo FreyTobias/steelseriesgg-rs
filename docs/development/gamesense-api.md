@@ -1,203 +1,89 @@
-# GameSense API Reference
+# GameSense API: ssgg server and official GG behaviour
 
-All 7 endpoints validated against GG 111.0.0 (port 53714), 2026-05-26.
+ssgg's server is `src/gamesense/server.rs` (request types in `src/gamesense/mod.rs`). The GG sections
+below were observed against GG 111.0.0 on 2026-05-26 and are reference only.
 
 ---
 
-## Port Discovery
+## ssgg server
 
-GG does **not** use a fixed port. The actual port is determined at runtime from:
+- **Bind**: `127.0.0.1`. Port 27301 by default: `ssgg server -p <port>`, or `[gamesense]` `port` /
+  `bind_address` in `config.toml` when the daemon starts the server.
+- **Discovery file**: on start, ssgg writes `{"address": "127.0.0.1:<port>"}` to `coreProps.json`:
+  Linux `/tmp/steelseries-engine/coreProps.json` (directory `0700`, file `0600`, owner-checked, no
+  symlinks), Windows `%PROGRAMDATA%\SteelSeries\SteelSeries Engine 3\coreProps.json`, macOS
+  `/Library/Application Support/SteelSeries Engine 3/coreProps.json`. On Windows this is the same file GG
+  uses, so running both overwrites it.
+- **CORS**: localhost-only. `is_origin_allowed` accepts origins whose host is `localhost`, `127.0.0.1` or
+  `::1`, with an optional numeric port; everything else (for example `localhost.evil.com`,
+  `localhost:evil.com`) is rejected. Allowed methods: GET, POST, OPTIONS; allowed header: Content-Type.
+  This policy may only be tightened (`AGENTS.md`, hard constraint 3).
 
-```
-C:\ProgramData\SteelSeries\SteelSeries Engine 3\coreProps.json
-C:\ProgramData\SteelSeries\GG\coreProps.json  (symlink/copy)
-```
+### Endpoints
 
-Example contents:
+| Method | Path | Handler | Effect |
+|--------|------|---------|--------|
+| POST | `/game_metadata` | `register_game` | Stores the game |
+| POST | `/bind_game_event` | `bind_event` | Stores the event binding and its handlers |
+| POST | `/register_game_event` | `bind_event` | Same handler as `/bind_game_event` |
+| POST | `/game_event` | `game_event` | Stores the value and runs the bound handlers |
+| POST | `/game_heartbeat` | `heartbeat` | Logs only |
+| POST | `/remove_game` | `remove_game` | Drops the game, its bindings and values |
+| POST | `/remove_game_event` | `remove_event` | Drops one binding |
+| GET | `/` | `server_info` | `{"address": "127.0.0.1", "encrypted_address": null, "sse_address": null, "version": "4.0.0"}` |
+
+Every POST returns `{"success": true}` on success. Keyboard and `rgb-per-key-zones` handlers compute a
+colour (static, gradient or range) and pass it to the RGB callback; screen and tactile handlers are
+logged only.
+
+---
+
+## Official GG (observed)
+
+### Port discovery
+
+GG does not use a fixed port. It publishes its addresses in
+`C:\ProgramData\SteelSeries\SteelSeries Engine 3\coreProps.json` (also under
+`C:\ProgramData\SteelSeries\GG\`):
+
 ```json
 {"encryptedAddress":"127.0.0.1:53723","ggEncryptedAddress":"127.0.0.1:6327","address":"127.0.0.1:53714"}
 ```
 
-- `address` → standard GameSense HTTP endpoint (use this)
-- `encryptedAddress` → HTTPS/TLS endpoint (unknown cert chain)
-- `ggEncryptedAddress` → GG-internal encrypted endpoint
+- `address`: plain HTTP GameSense endpoint
+- `encryptedAddress`: HTTPS endpoint (certificate chain unknown)
+- `ggEncryptedAddress`: GG-internal endpoint
 
-**ssgg behavior**: ssgg hardcodes port 27301, matching the official SteelSeries SDK documentation. GG uses a dynamic port. For local-only use, ssgg's fixed port is compatible because applications can find ssgg via a similar `coreProps.json` file.
+The official SDK documentation names port 27301, which is ssgg's default.
 
----
+### Responses
 
-## Endpoints (all 7 verified)
+GG echoes each request inside a wrapper object named after the endpoint and adds fields ssgg's types do
+not have:
 
-Port: **dynamic** (read from `coreProps.json`; official SDK documents 27301)
+| Endpoint | GG response |
+|----------|-------------|
+| `/game_metadata` | `{"game_metadata": {..., "is": "", "deinitialize_timer_length_ms": 0, "enabled": false, "options": null}}` |
+| `/bind_game_event`, `/register_game_event` | `{"<endpoint>": {..., "icon_id": 0, "value_optional": false, "data_fields": null}}` |
+| `/game_event` | `{"game_event": {"level": "", "game": ..., "event": ..., "data": {...}}}` |
+| `/game_heartbeat` | `{"game_heartbeat": {"game": ...}}` |
+| `/remove_game` | `{"remove_game_event": {"game": ...}}` (key is `remove_game_event`, not `remove_game`) |
 
-| Method | Path | GG Response Key | Verified |
-|--------|------|-----------------|----------|
-| POST | `/game_metadata` | `game_metadata` | ✅ |
-| POST | `/bind_game_event` | `bind_game_event` | ✅ |
-| POST | `/register_game_event` | `register_game_event` | ✅ |
-| POST | `/game_event` | `game_event` | ✅ |
-| POST | `/game_heartbeat` | `game_heartbeat` | ✅ |
-| POST | `/remove_game` | `remove_game_event` ⚠️ | ✅ |
-| POST | `/remove_game_event` | (not tested separately) | — |
+`/remove_game_event` was not tested separately. Sending `product_id` in `/bind_game_event` returns
+HTTP 400; GG sets that column internally.
 
-**Note**: `/remove_game` returns `{"remove_game_event": {...}}` — the response key says "remove_game_event", not "remove_game".
+### CORS
 
----
-
-## Request / Response Schemas (live-captured)
-
-### `POST /game_metadata`
-
-**Request** (matches ssgg `GameMetadata`):
-```json
-{"game":"SSGG_TEST","game_display_name":"ssgg Test","developer":"test"}
-```
-
-**Response** (GG returns a wrapper object):
-```json
-{
-  "game_metadata": {
-    "is": "",
-    "game": "SSGG_TEST",
-    "game_display_name": "ssgg Test",
-    "deinitialize_timer_length_ms": 0,
-    "developer": "test",
-    "enabled": false,
-    "options": null
-  }
-}
-```
-
-**Fields absent from ssgg's `GameMetadata` struct:**
-- `is`: always `""` — unknown purpose (possibly an internal type discriminator)
-- `enabled`: `false` — game starts disabled until it fires events
-- `options`: `null` — JSON options blob (see DB schema note)
-
-### `POST /bind_game_event`
-
-**Request** (standard bind):
-```json
-{
-  "game": "SSGG_TEST",
-  "event": "HEALTH",
-  "min_value": 0,
-  "max_value": 100,
-  "icon_id": 0,
-  "handlers": [
-    {
-      "device-type": "keyboard",
-      "zone": "function-keys",
-      "color": {"gradient": {"zero": {"red":0,"green":255,"blue":0}, "hundred": {"red":255,"green":0,"blue":0}}},
-      "mode": "percent"
-    }
-  ]
-}
-```
-
-**Response:**
-```json
-{
-  "bind_game_event": {
-    "game": "SSGG_TEST",
-    "event": "HEALTH",
-    "icon_id": 0,
-    "min_value": 0,
-    "max_value": 100,
-    "value_optional": false,
-    "data_fields": null,
-    "handlers": [...]
-  }
-}
-```
-
-**Fields absent from ssgg's `EventBinding` struct:**
-- `value_optional`: `false` — whether the event can fire without a value
-- `data_fields`: `null` — JSON array of structured data field definitions (see `is_fancy` in DB schema)
-
-**`product_id` is NOT a valid request field** — sending it returns HTTP 400. The DB column is set internally by GG.
-
-### `POST /register_game_event`
-
-**Request:**
-```json
-{"game":"SSGG_TEST","event":"MANA","min_value":0,"max_value":100}
-```
-
-**Response:**
-```json
-{
-  "register_game_event": {
-    "game": "SSGG_TEST",
-    "event": "MANA",
-    "icon_id": 0,
-    "min_value": 0,
-    "max_value": 100,
-    "value_optional": false,
-    "data_fields": null
-  }
-}
-```
-
-### `POST /game_event`
-
-**Request:**
-```json
-{"game":"SSGG_TEST","event":"HEALTH","data":{"value":75}}
-```
-
-**Response:**
-```json
-{
-  "game_event": {
-    "level": "",
-    "game": "SSGG_TEST",
-    "event": "HEALTH",
-    "data": {"value": 75}
-  }
-}
-```
-
-**`level` field**: Always `""` in responses — corresponds to the `level` column in `game_integration_event_bindings`. This is an internal GG priority/routing field set by GG, not by the game client.
-
-### `POST /game_heartbeat`
-
-**Request:** `{"game":"SSGG_TEST"}`  
-**Response:** `{"game_heartbeat":{"game":"SSGG_TEST"}}`
-
-### `POST /remove_game`
-
-**Request:** `{"game":"SSGG_TEST"}`  
-**Response:** `{"remove_game_event":{"game":"SSGG_TEST"}}`
-
-Note: response key is `remove_game_event`, not `remove_game`.
+GG answers with `Access-Control-Allow-Origin: *`, so any web page can call the local API. ssgg does not
+copy this.
 
 ---
 
-## CORS Policy
+## Differences that could matter to clients
 
-GG uses **wildcard CORS** — not localhost-restricted:
-
-```
-Access-Control-Allow-Origin: *
-Access-Control-Allow-Methods: POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type
-```
-
-**ssgg behavior**: ssgg enforces localhost-only origin (`src/gamesense/server.rs`). This is **more secure than GG**. ssgg's policy is correct and should not be loosened to match GG's wildcard.
-
-The wildcard in GG is a security weakness: any webpage a user visits can make requests to the local GameSense API. ssgg avoids this.
-
----
-
-## Implementation Gaps (ssgg vs GG)
-
-| Feature | ssgg | GG | Priority |
-|---------|------|----|----------|
-| Dynamic port from `coreProps.json` | Fixed 27301 | Dynamic | Medium |
-| `game_metadata.enabled` field | Not returned | Returned | Low |
-| `game_metadata.options` field | Not accepted | Accepted | Low |
-| `register_game_event` response includes `value_optional`, `data_fields` | Not returned | Returned | Low |
-| `bind_game_event` response includes `value_optional`, `data_fields` | Not returned | Returned | Low |
-| `game_event` response includes `level` | Not returned | Returned | Low |
-| `remove_game` response key | Not verified | `remove_game_event` | Low |
-| CORS policy | Localhost-only ✅ | Wildcard ⚠️ | ssgg is better |
+| Behaviour | ssgg | GG |
+|-----------|------|----|
+| Port | Fixed per run (default 27301) | Dynamic, from `coreProps.json` |
+| POST response body | `{"success": true}` | Echo wrapper per endpoint (above) |
+| `/` info endpoint | Yes | Not checked |
+| CORS | Localhost only | Wildcard |

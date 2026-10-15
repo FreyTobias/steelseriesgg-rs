@@ -5,7 +5,7 @@
 //! - https://github.com/wex/sonar-rev
 //! - https://github.com/PrzemekkkYT/GGSonarRev
 //!
-//! See `docs/development/SONAR_PROTOCOL.md` for complete API documentation.
+//! Sonar's config schema and the endpoints used here: `docs/development/database-schemas.md` ("Sonar Database").
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

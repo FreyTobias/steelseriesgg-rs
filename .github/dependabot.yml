@@ -102,9 +102,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # deps is a visible changelog type in release-please-config.json, so bumps open a release PR
     commit-message:
-      prefix: "chore"
-      include: scope
+      prefix: "deps"
     labels:
       - dependencies
       - rust
@@ -119,7 +119,7 @@ updates:
     schedule:
       interval: weekly
     commit-message:
-      prefix: "chore"
+      prefix: "deps"
     labels:
       - dependencies
       - rust

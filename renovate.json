@@ -14,7 +14,10 @@
     ":ignoreModulesAndTests",
     "docker:enableMajor",
     "preview:dockerCompose",
-    ":enablePreCommit"
+    ":enablePreCommit",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(deps)",
+    ":semanticCommitScopeDisabled"
   ],
   "automerge": true,
   "forkProcessing": "enabled",

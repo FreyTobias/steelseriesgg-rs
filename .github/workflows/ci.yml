@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: rustfmt, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: clippy
 
       - name: Install audio dependencies (for audio feature)
@@ -85,7 +85,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -113,7 +113,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
 
       - name: Install audio dependencies (for audio feature)
         if: contains(matrix.features, 'audio')

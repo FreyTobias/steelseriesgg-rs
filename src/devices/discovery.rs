@@ -11,7 +11,7 @@ use super::keyboards::apex::Apex3Tkl;
 use super::keyboards::apex_pro_tkl_2023::ApexProTkl2023;
 use super::keyboards::{GenericKeyboard, Keyboard};
 use super::product_ids::{
-    APEX_3_TKL, APEX_PRO, APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2,
+    APEX_3_TKL, APEX_7, APEX_PRO, APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2,
     APEX_PRO_TKL_2024, APEX_PRO_TKL_WIRELESS_2024, APEX_PRO_TKL_WIRELESS_2024_DONGLE,
 };
 use super::{
@@ -466,17 +466,67 @@ impl DeviceManager {
         };
         let generic_keyboard = GenericKeyboard::new(info.clone(), hid_device);
 
-        // Wrap in specific implementation if available
-        match info.product_id {
-            APEX_3_TKL => Ok(Box::new(Apex3Tkl::new(generic_keyboard))),
-            APEX_PRO
-            | APEX_PRO_TKL_2023
-            | APEX_PRO_TKL_2023_WIRELESS
-            | APEX_PRO_TKL_2023_WIRELESS_2
-            | APEX_PRO_TKL_2024
-            | APEX_PRO_TKL_WIRELESS_2024_DONGLE
-            | APEX_PRO_TKL_WIRELESS_2024 => Ok(Box::new(ApexProTkl2023::new(generic_keyboard))),
-            _ => Ok(Box::new(generic_keyboard)),
+        // Wrap in specific implementation if available. The class is what decides what the keyboard can
+        // do beyond lighting - the on-board profile path is answered by the class, so the class a product
+        // ID is built as is one decision, taken by [`keyboard_class`].
+        match keyboard_class(info.product_id) {
+            KeyboardClass::Apex3Tkl => Ok(Box::new(Apex3Tkl::new(generic_keyboard))),
+            KeyboardClass::ApexProTkl2023 => Ok(Box::new(ApexProTkl2023::new(generic_keyboard))),
+            KeyboardClass::Apex7 => Ok(Box::new(super::keyboards::apex_7::Apex7::new(generic_keyboard))),
+            KeyboardClass::Generic => Ok(Box::new(generic_keyboard)),
+        }
+    }
+
+    /// Open a keyboard to run an on-board profile read on, answering [`OnboardKeyboard`] for the selection.
+    ///
+    /// `product_id` is `ssgg onboard read --device`: the device's `idProduct` (every SteelSeries device
+    /// answers the same vendor ID, so the product ID identifies it). With it, only keyboards carrying that
+    /// product ID are candidates. Without it, every keyboard that answers [`Keyboard::onboard_codec`] is a
+    /// candidate, and the read runs on it when exactly one keyboard - not a mouse, not a headset - qualifies;
+    /// more than one answers [`OnboardKeyboard::Ambiguous`], which is what asks the caller for `--device` (and,
+    /// for two keyboards of one model, to disconnect one).
+    ///
+    /// Candidates are opened to ask them, which sends nothing: answering the protocol is a product-ID check
+    /// on the keyboard class discovery built. The read runs on the handle returned here, which is what
+    /// `usbhid` needs for the firmware-poll answer and the pacing read after every pull: it polls an
+    /// interrupt endpoint only while a descriptor on the node is open.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a refresh failure or a candidate that cannot be opened.
+    pub fn open_onboard_keyboard(&mut self, product_id: Option<u16>) -> Result<OnboardKeyboard> {
+        self.refresh()?;
+        let mut candidates: Vec<(u16, String, Box<dyn Keyboard>)> = Vec::new();
+        for info in self.keyboards() {
+            if product_id.is_some_and(|pid| info.product_id != pid) {
+                continue;
+            }
+            // A named keyboard has to answer for its own open failure; a keyboard the caller never named is
+            // skipped when it cannot be opened, the same way discovery skips a device it cannot open.
+            let keyboard = match self.open_keyboard(info) {
+                Ok(keyboard) => keyboard,
+                Err(e) if product_id.is_some() => return Err(e),
+                Err(e) => {
+                    tracing::debug!("onboard: skipping {} ({:04X}): {e}", info.name, info.product_id);
+                    continue;
+                }
+            };
+            if !keyboard.supports_onboard_profile() {
+                continue;
+            }
+            candidates.push((info.product_id, info.name.to_string(), keyboard));
+        }
+        let listed: Vec<(u16, String)> = candidates
+            .iter()
+            .map(|(product_id, name, _)| (*product_id, name.clone()))
+            .collect();
+        match onboard_choice(&listed) {
+            OnboardChoice::NotFound => Ok(OnboardKeyboard::NotFound { product_id }),
+            OnboardChoice::Ambiguous => Ok(OnboardKeyboard::Ambiguous { keyboards: listed }),
+            OnboardChoice::Use(index) => {
+                let (_, _, keyboard) = candidates.swap_remove(index);
+                Ok(OnboardKeyboard::Keyboard(keyboard))
+            }
         }
     }
 
@@ -890,6 +940,78 @@ pub fn print_device_summary(manager: &DeviceManager) {
     }
 }
 
+/// The keyboard class a product ID is built as by [`DeviceManager::open_keyboard`].
+///
+/// Split out so the rule is testable without hardware, because the class is what answers the on-board
+/// profile protocol: [`Keyboard::onboard_codec`] is a property of the class discovery built, so a
+/// keyboard only reads a profile off the board when its product ID is built as the class that speaks
+/// the protocol. `Apex7` is the on-board class, and it is built for the board the frames are known from
+/// and for nothing else - the `0x1614` / `0x1616` / `0x1618` platform siblings keep lighting only and
+/// answer no codec, because nobody has read an answer from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardClass {
+    Apex3Tkl,
+    ApexProTkl2023,
+    Apex7,
+    Generic,
+}
+
+#[must_use]
+pub fn keyboard_class(product_id: u16) -> KeyboardClass {
+    match product_id {
+        APEX_3_TKL => KeyboardClass::Apex3Tkl,
+        APEX_PRO
+        | APEX_PRO_TKL_2023
+        | APEX_PRO_TKL_2023_WIRELESS
+        | APEX_PRO_TKL_2023_WIRELESS_2
+        | APEX_PRO_TKL_2024
+        | APEX_PRO_TKL_WIRELESS_2024_DONGLE
+        | APEX_PRO_TKL_WIRELESS_2024 => KeyboardClass::ApexProTkl2023,
+        APEX_7 => KeyboardClass::Apex7,
+        _ => KeyboardClass::Generic,
+    }
+}
+
+/// Which candidate an on-board profile read runs on. The decision is split out from
+/// [`DeviceManager::open_onboard_keyboard`] so the rule is testable without hardware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnboardChoice {
+    /// Use this candidate (index into the candidate list).
+    Use(usize),
+    /// No candidate: no keyboard of the selection answers the on-board profile protocol.
+    NotFound,
+    /// More than one keyboard answers the protocol: the caller has to name one by product ID, or, when they
+    /// share a product ID, disconnect all but one.
+    Ambiguous,
+}
+
+/// The selection rule, over the candidate list in the order the manager lists it. The list is already one entry
+/// per physical keyboard (`DeviceManager::keyboards` dedupes the collections of a device), so more than one
+/// entry is more than one keyboard and the write must not pick between them. `--device` narrows the list by
+/// product ID before it gets here; two keyboards of one model survive that and stay ambiguous, because the
+/// manager opens a model's control collection by product ID and cannot tell them apart.
+#[must_use]
+pub fn onboard_choice(candidates: &[(u16, String)]) -> OnboardChoice {
+    match candidates {
+        [] => OnboardChoice::NotFound,
+        [_] => OnboardChoice::Use(0),
+        _ => OnboardChoice::Ambiguous,
+    }
+}
+
+/// What a keyboard selection for an on-board profile read answered. No `Debug`: the keyboard it carries
+/// is a trait object.
+pub enum OnboardKeyboard {
+    /// The keyboard to read on.
+    Keyboard(Box<dyn Keyboard>),
+    /// No keyboard of the selection answers the on-board profile protocol. `product_id` is what was asked
+    /// for; `None` when the caller asked for "the connected on-board keyboard".
+    NotFound { product_id: Option<u16> },
+    /// More than one keyboard answers the protocol: `keyboards` lists them (`product_id`, name) and the
+    /// caller has to name one, which only a product ID can do between different models.
+    Ambiguous { keyboards: Vec<(u16, String)> },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1193,5 +1315,63 @@ mod tests {
             manager.open_headset(&info),
             Err(Error::DeviceCommunication(msg)) if msg.contains("not a headset")
         ));
+    }
+
+    #[test]
+    fn onboard_choice_needs_a_candidate() {
+        assert_eq!(onboard_choice(&[]), OnboardChoice::NotFound);
+    }
+
+    #[test]
+    fn onboard_choice_accepts_the_only_keyboard() {
+        let listed = vec![(0x1612, "Apex 7".to_string())];
+        assert_eq!(onboard_choice(&listed), OnboardChoice::Use(0));
+    }
+
+    /// The candidate list is one entry per physical keyboard, so two entries of one model are two keyboards
+    /// and a write must not pick one of them.
+    #[test]
+    fn onboard_choice_refuses_two_keyboards_of_one_model() {
+        let listed = vec![(0x1612, "Apex 7".to_string()), (0x1612, "Apex 7".to_string())];
+        assert_eq!(onboard_choice(&listed), OnboardChoice::Ambiguous);
+    }
+
+    #[test]
+    fn onboard_choice_asks_for_a_product_id_between_two_models() {
+        let listed = vec![(0x1612, "Apex 7".to_string()), (0x1616, "Apex 7 TKL".to_string())];
+        assert_eq!(onboard_choice(&listed), OnboardChoice::Ambiguous);
+    }
+
+    #[test]
+    fn keyboard_class_builds_the_board_the_onboard_protocol_is_measured_on() {
+        // The class is the on-board scope: build anything else for 0x1612 and the read has no codec to answer.
+        assert_eq!(keyboard_class(APEX_7), KeyboardClass::Apex7);
+        assert_eq!(keyboard_class(APEX_3_TKL), KeyboardClass::Apex3Tkl);
+        assert_eq!(keyboard_class(APEX_PRO_TKL_2023), KeyboardClass::ApexProTkl2023);
+    }
+
+    #[test]
+    fn keyboard_class_leaves_the_unmeasured_platform_siblings_on_lighting_only() {
+        for pid in [0x1614u16, 0x1616, 0x1618] {
+            assert_eq!(
+                keyboard_class(pid),
+                KeyboardClass::Generic,
+                "product ID {pid:04X} is a platform sibling nobody has read an answer from"
+            );
+        }
+    }
+
+    #[test]
+    fn open_onboard_keyboard_answers_notfound_for_a_product_id_with_no_keyboard() {
+        let Ok(mut manager) = DeviceManager::new() else { return };
+        // A product ID no SteelSeries device uses: no candidate, and the read names no family to fall back on.
+        match manager.open_onboard_keyboard(Some(0xFEFF)) {
+            Ok(OnboardKeyboard::NotFound { product_id }) => assert_eq!(product_id, Some(0xFEFF)),
+            Ok(OnboardKeyboard::Keyboard(_)) => panic!("a product ID no device uses answered a keyboard"),
+            Ok(OnboardKeyboard::Ambiguous { keyboards }) => {
+                panic!("a product ID no device uses answered an ambiguous selection: {keyboards:?}")
+            }
+            Err(e) => panic!("selection should answer NotFound, not an error: {e}"),
+        }
     }
 }

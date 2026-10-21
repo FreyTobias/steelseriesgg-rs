@@ -332,7 +332,7 @@ ok('index.html loads the generated table before app.js', () => {
   const html = read('tools/profile-gui/index.html');
   const at = html.indexOf('products.generated.js');
   return at > 0 && at < html.indexOf('<script src="app.js"') && /app\.js/.test(html);
-}, () => read('tools/profile-gui/index.html').match(/<script[^>]*>/g));
+}, () => read('tools/profile-gui/index.html').match(/<script[^>]*>/gi));
 
 ok('the page sees the imported table', () => app.PRODUCTS === globalThis.SsggProducts
   && app.PRODUCTS.sourceHash === rustProducts.sourceHash

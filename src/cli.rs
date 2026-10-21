@@ -77,6 +77,15 @@ pub(crate) enum Commands {
         action: OnboardAction,
     },
 
+    /// Serve the on-board profile editor (tools/profile-gui) on 127.0.0.1, with a live lighting panel that
+    /// drives the first keyboard. `[EXPERIMENTAL]` lighting; only a solid colour on the wired Apex Pro TKL 2023
+    /// is hardware-confirmed
+    Gui {
+        /// Port to listen on (0 picks a free one)
+        #[arg(short, long, default_value = "8765")]
+        port: u16,
+    },
+
     /// Start the GameSense server
     Server {
         /// Port to listen on
@@ -610,8 +619,8 @@ pub(crate) enum StreamerAction {
 pub(crate) enum PollrateAction {
     /// Set mouse polling rate
     Mouse {
-        /// Polling rate in Hz (125, 500, 1000, 2000, 4000)
-        /// Note: Rates above 1000Hz require hardware support
+        /// Polling rate in Hz (125, 250, 500, 1000, 2000, 4000)
+        /// Note: Rates above 1000Hz cannot be set through the Linux kernel parameter
         rate: u32,
 
         /// Save to config and apply on daemon startup
@@ -621,8 +630,8 @@ pub(crate) enum PollrateAction {
 
     /// Set keyboard polling rate
     Keyboard {
-        /// Polling rate in Hz (125, 500, 1000, 2000, 4000)
-        /// Note: Rates above 1000Hz require hardware support
+        /// Polling rate in Hz (125, 250, 500, 1000, 2000, 4000)
+        /// Note: Rates above 1000Hz cannot be set through the Linux kernel parameter
         rate: u32,
 
         /// Save to config and apply on daemon startup

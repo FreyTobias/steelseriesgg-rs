@@ -125,6 +125,64 @@ GG names PID `0x1628` `apex_pro_tkl_2022` regardless of the retail year.
 | 0x230A | arctis_gamebuds_dongle |
 | 0x230C | arctis_gamebuds_case |
 
+### Arctis Nova 7 family protocol [EXPERIMENTAL]
+
+Source: two community forks. Nothing here has been run from `ssgg` on hardware, so every command is
+Experimental (see `.claude/rules/experimental-protocol.md`). Code: `src/devices/headsets/nova7.rs`
+(per-PID table `NOVA7_MODELS`) and `HeadsetSettingCommand` / `HeadsetStatusQueryCommand` in
+`src/devices/hid_reports.rs`.
+
+- Transport: 64-byte output reports `00 <opcode> <arg>` zero padded (byte 0 is the hidapi report number), on the
+  vendor control collection (usage page `0xFFC0`, interface 3 in the forks). `control_score` already ranks that
+  usage page first, so no Nova 7 specific selection is needed.
+- Commands: sidetone `00 39 <0..=3>`, microphone volume `00 37 <0..=7>`, auto-off `00 a3 <minutes>`,
+  status query `00 b0`. The save frame `00 09` persists to the headset and is never sent.
+- Status reply (no report ID): `b0 <power> <battery> <charge> <chat game> <chat chat>`. Connected only when
+  power is 3 and charge is not 0. Charge 1 or 2 is charging, 3 is not. Battery is 0-100 on percent models and 0-4
+  steps (x25) on the 4-step models. ChatMix bytes are 0-100 each.
+- No EQ preset or mic mute opcode is known; `ssgg` returns an error for both without sending anything.
+- 0x2200, 0x2204 and 0x2208 (the RX dongles) are not in the table and stay on `GenericHeadset`.
+- 7P variants (0x220A, 0x2298, 0x22A7) have neither sidetone nor ChatMix. Variants with the 4-step battery:
+  0x2202, 0x2206, 0x220A, 0x223A, 0x227A, 0x22A4. Everything else reports percent.
+- Arctis Nova Pro Omni (0x2290) has no known protocol and is detect-only.
+
+### Mice: Modern family [EXPERIMENTAL]
+
+Source: a community fork derived from rivalcfg (data licensed WTFPL/GPL, reimplemented here from the facts, with
+our own test vectors). Nothing here has been run from `ssgg` on hardware, so every command is Experimental (see
+`.claude/rules/experimental-protocol.md`). Code: `src/devices/mice/` (`modern.rs` holds the per-PID table
+`MOUSE_MODELS`, `dpi_tables.rs` the sensor code tables) and the `Mouse*Command` types in
+`src/devices/hid_reports.rs`. CLI: `ssgg mouse status | dpi <value> | poll-rate <hz> | color <name|hex>`.
+
+Supported (24 PIDs): Aerox 3 `0x1836`; Aerox 3 Wireless `0x1838` (2.4 GHz), `0x183A`, `0x1878`, `0x187A`;
+Aerox 5 `0x1850`; Aerox 5 Wireless `0x1852`, `0x1854`, `0x185C`, `0x185E`, `0x1860`, `0x1862`; Aerox 9 Wireless
+`0x1858`, `0x185A`, `0x1874`, `0x1876`; Prime Mini `0x184D`; Prime Mini Wireless `0x1848`, `0x184A`; Prime
+Wireless `0x1840`, `0x1842`; Rival 3 Gen 2 `0x1870`; Rival 5 `0x183C`, `0x183E`. Every PID in the requested
+scope belongs to this family in the fork; none was dropped.
+
+- Transport: output reports `00 <opcode> <args>`, variable length and not padded by `ssgg` (hidapi pads on
+  Windows). Commands go to one interface per model: 3 for everything but the Rival 5, which uses 0. A 2.4 GHz
+  receiver PID sets bit `0x40` on every opcode and answers each setting with a 64-byte report that is read and
+  dropped. Commands are spaced 50 ms apart.
+- DPI: `00 2D 01 <preset> <code>`; the Rival 3 Gen 2 uses opcode `34` and sends the code once per axis. Preset
+  index is 1 on Aerox 3 and Rival 3 Gen 2, 0 elsewhere. Ranges: 200-8500 (Aerox 3, Rival 3 Gen 2, TrueMove Core
+  table), 100-18000 in steps of 100 (all others, TrueMove Air table), Prime Mini 50-18000 in steps of 50 with a
+  16-bit little-endian code `dpi / 50`. Off-step and out-of-range values are rejected.
+- Polling rate: `00 2B <code>`; 125/250/500/1000 Hz is `04 03 02 01` on wired-only models and Rival 5 / Prime
+  Mini, `03 02 01 00` on the wireless models.
+- Colour: `00 21 <selector> ... <r g b>` once per LED zone. Aerox 3/5 and Rival 3 Gen 2 (3 zones): selector is a
+  mask byte with the zone bit, then 3 zero bytes per earlier zone. Rival 5 (10 zones): 16-bit little-endian mask,
+  same padding. Wireless Aerox and Prime Wireless: `01 <zone>`. Prime Mini: `00`. A receiver PID sends `61`.
+- Battery: `00 92` (`D2` on a receiver PID) on wireless models; reply byte 1 is bit 7 charging, low bits charge
+  in 5 percent steps plus one. Levels outside 0-100 decode as unknown.
+- Never implemented: the save command `11 00` (writes to the mouse's on-board memory). `ssgg` sends no
+  save, so whether a setting survives a power cycle is unknown.
+
+Skipped on purpose: reactive and rainbow effects, button mapping, multi-stage sensitivity presets, brightness,
+sleep and dim timers, firmware queries. Not covered, other command sets: Prime and Prime+ (`0x182E`, `0x182C`,
+`0x182A`, `0x1856`), Rival 3 / Rival 3 Wireless, the older Rival (95-710), Sensei (310, TEN, [RAW]), Kana v2 and
+Kinzu v2.
+
 ---
 
 ## Keyboard HID protocol
@@ -146,7 +204,7 @@ Discovery picks the control collection by usage page (`control_score`, `src/devi
 the control collection is interface 1, usage page `0xFFC0`, output report 65 bytes, feature report 645
 bytes (measured on Windows 2026-08-18; `STEELSERIES_CONTROL_USAGE_PAGE` in `src/devices/mod.rs`).
 Interface 4 is vendor page `0xFFC1`, input only. The full 10-collection list is the
-`apex_pro_tkl_2023_table()` test fixture in `discovery.rs`. Other models are unverified.
+`apex_pro_tkl_2023_table()` test fixture in `discovery.rs`. Other models are unverified. `[EXPERIMENTAL]` The Apex M750 (`0x0616`) exposes many interfaces and only interface 2 is used (fork, untested): `control_score` accepts no other interface for it, preferring its vendor-defined collection.
 
 ### Report format
 
@@ -165,10 +223,12 @@ Keyboard output reports are 65 bytes: report ID `0x00`, command byte, data, zero
 | `0x23` | `Apex8ZoneBrightnessCommand` | `[EXPERIMENTAL]` | Apex 3 TKL brightness `[00 23 level ..]`, level `0x00`-`0x10` scaled from 0-100 (OpenRGB `SteelSeriesApex8ZoneController`). Sent by `rgb brightness` on `0x1622`. |
 | `0x25`, `0x26` | `ReactiveMode`, `ColorShift` | `[EXPERIMENTAL]` | Enum values only; the uncalled `Apex3Tkl` helpers (and the `0x24` OSD helper) were removed on 2026-10-15. |
 | `0x2D` | `ActuationControl` | `[EXPERIMENTAL]` | `[00 2D value ..]`, value 1-40 = 0.1-4.0 mm (`ActuationCommand`). Sent by `ssgg actuation`. GG does not use it; it writes actuation through the on-board profile blob (capture note). |
-| `0x40` | `Apex2023Direct` | `[EXPERIMENTAL]` | Lighting frame `40 54 [usage R G B] x84`, feature report. Used for `rgb color` and `rgb perkey` on `0x1628`. See the capture note. |
-| `0x3A` | (`APEX_GEN1_PACKET_ID_DIRECT`) | `[EXPERIMENTAL]` | Original Apex Pro `0x1610` direct frame: 643-byte feature report `00 3A N [usage R G B] xN` on interface 1, no init (OpenRGB `SteelSeriesApexController`, Gen 1). Untested here (issue #283). |
-| `0x4B` | `APEX_2023_PACKET_ID_INIT` | `[EXPERIMENTAL]` | Init feature report from OpenRGB, sent before direct frames on 2023/2024 models except `0x1628` (GG does not send it). |
-| `0x61` | `APEX_2023_PACKET_ID_DIRECT_WIRELESS` | `[EXPERIMENTAL]` | Direct frame ID for the wireless models. A code comment reports it working on Gen 3 wireless (`0x1644`/`0x1646`); no test record in this repo. |
+| `0x40` | `Apex2023Direct` | `[EXPERIMENTAL]` | Lighting frame `40 54 [usage R G B] x84`, feature report. Used for `rgb color` and `rgb perkey` on `0x1628`. See the capture note. The Apex 9 TKL `0x1634` and Apex 9 Mini `0x1620` take the same frame in a 513-byte report (127 entries fit, 112 are sent, count byte `0x70`) with no `0x4B` init, `[EXPERIMENTAL]`, community fork, untested. |
+| `0x3A` | `ApexGen1Direct` | `[EXPERIMENTAL]` | Original Apex Pro `0x1610` direct frame: 643-byte feature report `00 3A N [usage R G B] xN` on interface 1, no init (OpenRGB `SteelSeriesApexController`, Gen 1). Untested here (issue #283). The same frame is routed to Apex 5 `0x161C`, Apex 7 TKL `0x1618`, Apex Pro TKL `0x1614` and Apex Pro (2024) `0x1640` from a community fork's table: unverified, never run on hardware. |
+| `0x8E` | `ApexMDirect` | `[EXPERIMENTAL]` | Apex M750 `0x0616` direct frame, 513-byte feature report on interface 2: header `00 00 00 01 8E 01 03 06 16`, then 132 `R G B` slots from index 9. The slot-to-key map is unknown, so `ssgg` fills every slot (solid colour and off only). Community fork, untested (issue #276). |
+| `0x01` | `ApexMEnable` | `[EXPERIMENTAL]` | Apex M750 enable sequence, three 513-byte feature reports sent once before the first frame, all zero but (index 0 is the report ID): `[4]=01 [6]=85`; `[4]=03 [5]=01 [7]=FF`; `[4]=01 [6]=85 [7]=FF`. `0x01` is only byte 4 of the first and third; the three share no leading byte. Community fork, untested. |
+| `0x4B` | `CommandCode::Apex2023Init` (`DirectInitCommand`) | `[EXPERIMENTAL]` | Init feature report from OpenRGB, sent before direct frames on 2023/2024 models except `0x1628` (GG does not send it). |
+| `0x61` | `CommandCode::Apex2023DirectWireless` (`DirectFrameCommand`) | `[EXPERIMENTAL]` | Direct frame ID for the wireless models. A code comment reports it working on Gen 3 wireless (`0x1644`/`0x1646`); no test record in this repo. |
 | `0x83` | `OnboardBufferRead` | confirmed (`0x1612`) | `83 \| 00 \| buffer offset u16 \| size u16` feature report, answered by the 642-byte `GET_REPORT` read-back. Reads a profile slot (`ssgg onboard read`). |
 | `0x85` | `OnboardPayloadPull` | confirmed (`0x1612`) | `85 \| 00 \| file id u16 \| file offset u32 \| size u16`: file into the resource buffer. Answered only by the keyboard's ordinary input report (flow control). |
 | `0x88` | `OnboardFileOpen` | confirmed (`0x1612`) | `88 \| 00 \| file id u16`: open the profile file a write is about to push, answered `88 01 …`. |

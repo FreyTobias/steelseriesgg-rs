@@ -17,6 +17,13 @@ pub const KEYBOARD_REPORT_SIZE: usize = 65;
 /// Standard HID report size for SteelSeries headsets (no report ID).
 pub const HEADSET_REPORT_SIZE: usize = 64;
 
+/// Buffer a Modern-family mouse command is serialized into. The reports themselves are shorter and variable
+/// in length (the longest, a Rival 5 logo colour, is 34 bytes), so `serialize` returns the used length.
+pub const MOUSE_REPORT_BUFFER_SIZE: usize = 65;
+
+/// Bit set on the first byte of every command sent to the 2.4 GHz receiver PID of a Modern-family mouse.
+pub const MOUSE_DONGLE_FLAG: u8 = 0x40;
+
 /// Maximum number of RGB zones supported by keyboards.
 pub const MAX_RGB_ZONES: usize = 12;
 
@@ -41,6 +48,21 @@ pub enum CommandCode {
     /// [EXPERIMENTAL] Apex Pro TKL 2023 direct-mode lighting frame (0x40), sent as a feature
     /// report by `ApexProTkl2023`. See docs/development/apex-pro-tkl-2023-gg-capture.md.
     Apex2023Direct = 0x40,
+    /// [EXPERIMENTAL] Direct-mode lighting frame of the wireless Apex Pro TKL models (0x61), see
+    /// [`DirectFrameCommand`]. Not listed as confirmed in `.claude/rules/experimental-protocol.md`.
+    Apex2023DirectWireless = 0x61,
+    /// [EXPERIMENTAL] Direct-mode lighting frame of the original Apex Pro (0x3A), from OpenRGB, untested.
+    ApexGen1Direct = 0x3A,
+    /// [EXPERIMENTAL] Apex M750 direct frame, from a community fork, untested. The frame has no command byte
+    /// at offset 1; `0x8E` is byte 4 of its header `00 00 00 01 8E 01 03 06 16`. See [`ApexMDirectCommand`].
+    ApexMDirect = 0x8E,
+    /// [EXPERIMENTAL] Apex M750 enable sequence, from a community fork, untested. The three reports have no
+    /// shared leading byte: `0x01` is byte 4 of the first and third, the second carries `03` there (owned
+    /// by [`CommandCode::ProfileChunk`]). See [`ApexMEnableCommand`].
+    ApexMEnable = 0x01,
+    /// [EXPERIMENTAL] Gen 3 init feature report (0x4B) sent once before the first direct frame, see
+    /// [`DirectInitCommand`].
+    Apex2023Init = 0x4B,
     /// Actuation point control (0x2D) - EXPERIMENTAL
     /// NOTE: This command code is experimental based on hardware research.
     ActuationControl = 0x2D,
@@ -86,6 +108,33 @@ pub enum CommandCode {
     /// `ssgg onboard write` and `ssgg onboard load` commands send it, on request only; a plain read sends
     /// nothing. See [`OnboardProfileDeployCommand`].
     OnboardProfileDeploy = 0x89,
+    /// [EXPERIMENTAL] Arctis Nova 7 family sidetone level (0x39, `00 39 <0..=3>`), see
+    /// [`HeadsetSettingCommand`]. From community forks, untested on hardware.
+    HeadsetSidetone = 0x39,
+    /// [EXPERIMENTAL] Arctis Nova 7 family microphone volume (0x37, `00 37 <0..=7>`), see
+    /// [`HeadsetSettingCommand`]. From community forks, untested on hardware.
+    HeadsetMicVolume = 0x37,
+    /// [EXPERIMENTAL] Arctis Nova 7 family inactivity auto-off in minutes (0xA3, `00 a3 <minutes>`), see
+    /// [`HeadsetSettingCommand`]. From community forks, untested on hardware.
+    HeadsetAutoOff = 0xA3,
+    /// [EXPERIMENTAL] Arctis Nova 7 family status query (0xB0, `00 b0`), answered by an input report that
+    /// starts with `b0`, see [`HeadsetStatusQueryCommand`]. From community forks, untested on hardware.
+    HeadsetStatus = 0xB0,
+    /// [EXPERIMENTAL] Modern-family mouse polling rate (0x2B, `00 2b <code>`; 0x6B on a 2.4 GHz receiver PID),
+    /// see [`MousePollRateCommand`]. From a community rivalcfg-derived fork, untested on hardware.
+    MousePollRate = 0x2B,
+    /// [EXPERIMENTAL] Modern-family mouse battery query (0x92, `00 92`; 0xD2 on a 2.4 GHz receiver PID), see
+    /// [`MouseBatteryQueryCommand`]. From a community rivalcfg-derived fork, untested on hardware.
+    MouseBattery = 0x92,
+    /// [EXPERIMENTAL] Modern-family mouse DPI, see [`MouseDpiCommand`]. A tag, never a wire byte: the wire opcode
+    /// is 0x2D on every model but the Rival 3 Gen 2 (0x34), and 0x2D already belongs to
+    /// [`CommandCode::ActuationControl`]. From a community rivalcfg-derived fork, untested on hardware.
+    MouseDpi = 0xF2,
+    /// [EXPERIMENTAL] Modern-family mouse LED colour, see [`MouseColorCommand`]. A tag, never a wire byte: the
+    /// wire opcode is 0x21 (0x61 on a 2.4 GHz receiver PID), which belong to
+    /// [`CommandCode::RgbControl`] and [`CommandCode::Apex2023DirectWireless`]. From a community
+    /// rivalcfg-derived fork, untested on hardware.
+    MouseColor = 0xF3,
 }
 
 impl fmt::Display for CommandCode {
@@ -100,6 +149,11 @@ impl fmt::Display for CommandCode {
             CommandCode::ColorShift => write!(f, "COLOR_SHIFT"),
             CommandCode::PerKeyRgb => write!(f, "PERKEY_RGB_EXPERIMENTAL"),
             CommandCode::Apex2023Direct => write!(f, "APEX2023_DIRECT_EXPERIMENTAL"),
+            CommandCode::Apex2023DirectWireless => write!(f, "APEX2023_DIRECT_WIRELESS_EXPERIMENTAL"),
+            CommandCode::ApexGen1Direct => write!(f, "APEX_GEN1_DIRECT_EXPERIMENTAL"),
+            CommandCode::ApexMDirect => write!(f, "APEX_M_DIRECT_EXPERIMENTAL"),
+            CommandCode::ApexMEnable => write!(f, "APEX_M_ENABLE_EXPERIMENTAL"),
+            CommandCode::Apex2023Init => write!(f, "APEX2023_INIT_EXPERIMENTAL"),
             CommandCode::ActuationControl => write!(f, "ACTUATION_CTRL_EXPERIMENTAL"),
             CommandCode::ProfileChunk => write!(f, "PROFILE_CHUNK_EXPERIMENTAL"),
             CommandCode::OnboardPayloadPull => write!(f, "ONBOARD_PULL"),
@@ -110,6 +164,14 @@ impl fmt::Display for CommandCode {
             CommandCode::OnboardFirmwareVersion => write!(f, "FIRMWARE_VERSION"),
             CommandCode::OnboardDriverMode => write!(f, "DRIVER_MODE_EXPERIMENTAL"),
             CommandCode::OnboardProfileDeploy => write!(f, "LOAD_PROFILE"),
+            CommandCode::HeadsetSidetone => write!(f, "HEADSET_SIDETONE_EXPERIMENTAL"),
+            CommandCode::HeadsetMicVolume => write!(f, "HEADSET_MIC_VOLUME_EXPERIMENTAL"),
+            CommandCode::HeadsetAutoOff => write!(f, "HEADSET_AUTO_OFF_EXPERIMENTAL"),
+            CommandCode::HeadsetStatus => write!(f, "HEADSET_STATUS_EXPERIMENTAL"),
+            CommandCode::MousePollRate => write!(f, "MOUSE_POLL_RATE_EXPERIMENTAL"),
+            CommandCode::MouseBattery => write!(f, "MOUSE_BATTERY_EXPERIMENTAL"),
+            CommandCode::MouseDpi => write!(f, "MOUSE_DPI_EXPERIMENTAL"),
+            CommandCode::MouseColor => write!(f, "MOUSE_COLOR_EXPERIMENTAL"),
         }
     }
 }
@@ -128,6 +190,9 @@ impl CommandCode {
             0x26 => Some(CommandCode::ColorShift),
             0x23 | 0x2A => Some(CommandCode::PerKeyRgb),
             0x40 => Some(CommandCode::Apex2023Direct),
+            0x61 => Some(CommandCode::Apex2023DirectWireless),
+            0x3A => Some(CommandCode::ApexGen1Direct),
+            0x4B => Some(CommandCode::Apex2023Init),
             0x2D => Some(CommandCode::ActuationControl),
             0x03 => Some(CommandCode::ProfileChunk),
             0x85 => Some(CommandCode::OnboardPayloadPull),
@@ -138,6 +203,12 @@ impl CommandCode {
             0x90 => Some(CommandCode::OnboardFirmwareVersion),
             0x6C => Some(CommandCode::OnboardDriverMode),
             0x89 => Some(CommandCode::OnboardProfileDeploy),
+            0x39 => Some(CommandCode::HeadsetSidetone),
+            0x37 => Some(CommandCode::HeadsetMicVolume),
+            0xA3 => Some(CommandCode::HeadsetAutoOff),
+            0xB0 => Some(CommandCode::HeadsetStatus),
+            0x2B => Some(CommandCode::MousePollRate),
+            0x92 => Some(CommandCode::MouseBattery),
             _ => None,
         }
     }
@@ -150,6 +221,8 @@ pub enum HidDeviceType {
     Keyboard,
     /// Headset (64-byte reports without report ID)
     Headset,
+    /// Mouse (variable-length reports that start with the report ID, at most [`MOUSE_REPORT_BUFFER_SIZE`])
+    Mouse,
 }
 
 impl HidDeviceType {
@@ -158,12 +231,13 @@ impl HidDeviceType {
         match self {
             HidDeviceType::Keyboard => KEYBOARD_REPORT_SIZE,
             HidDeviceType::Headset => HEADSET_REPORT_SIZE,
+            HidDeviceType::Mouse => MOUSE_REPORT_BUFFER_SIZE,
         }
     }
 
     /// Whether this device type includes a report ID byte.
     pub fn includes_report_id(self) -> bool {
-        matches!(self, HidDeviceType::Keyboard)
+        matches!(self, HidDeviceType::Keyboard | HidDeviceType::Mouse)
     }
 }
 
@@ -487,6 +561,237 @@ impl HidCommand for ProfileChunkCommand<'_> {
 
     fn description(&self) -> String {
         format!("Profile chunk: {} bytes at offset {}", self.data.len(), self.offset)
+    }
+}
+
+/// [EXPERIMENTAL] Direct-mode lighting frame, a feature report:
+/// `00 | packet id | key count | (usage R G B) x count | zero padding`, `report_len` bytes in all.
+///
+/// Packet id `0x40` (wired Apex Pro TKL 2023, Gen 3 and `[EXPERIMENTAL]` the Apex 9 pair), `0x61` (wireless
+/// Gen 3) or `0x3A` (original Apex Pro and `[EXPERIMENTAL]` four more Gen 1 models, from OpenRGB and a
+/// community fork). One frame replaces every key. Hardware evidence is thin: a solid-colour and a
+/// per-key `0x40` frame were replayed on the wired Apex Pro TKL 2023 (`0x1628`, 2026-10-14 and 2026-10-21);
+/// see docs/development/apex-pro-tkl-2023-gg-capture.md.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectFrameCommand<'a> {
+    /// Frame packet id: [`CommandCode::Apex2023Direct`], [`CommandCode::Apex2023DirectWireless`] or
+    /// [`CommandCode::ApexGen1Direct`].
+    pub packet: CommandCode,
+    /// Report length including the report-ID byte (643; 645 for the wired 2023 model; 513 for the Apex 9 pair).
+    pub report_len: usize,
+    /// `(HID usage, colour)` per key, in the order the board expects.
+    pub entries: &'a [(u8, Color)],
+}
+
+impl DirectFrameCommand<'_> {
+    const HEADER_LEN: usize = 3;
+    const ENTRY_LEN: usize = 4;
+}
+
+impl HidCommand for DirectFrameCommand<'_> {
+    fn command_code(&self) -> CommandCode {
+        self.packet
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        check_report_buffer(buffer, self.report_len)?;
+        let report = &mut buffer[..self.report_len];
+        report.fill(0);
+        report[1] = self.packet as u8;
+        report[2] = self.entries.len() as u8;
+        let (slots, _) = report[Self::HEADER_LEN..].as_chunks_mut::<4>();
+        for (slot, (usage, color)) in slots.iter_mut().zip(self.entries) {
+            *slot = [*usage, color.r, color.g, color.b];
+        }
+        Ok(self.report_len)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !matches!(
+            self.packet,
+            CommandCode::Apex2023Direct | CommandCode::Apex2023DirectWireless | CommandCode::ApexGen1Direct
+        ) {
+            return Err(Error::InvalidConfig(format!(
+                "{} is not a direct-mode frame packet id",
+                self.packet
+            )));
+        }
+        let needed = Self::HEADER_LEN + self.entries.len() * Self::ENTRY_LEN;
+        if self.entries.len() > usize::from(u8::MAX) || needed > self.report_len {
+            return Err(Error::InvalidConfig(format!(
+                "{} direct-mode entries need {} bytes, the {}-byte report holds fewer",
+                self.entries.len(),
+                needed,
+                self.report_len
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Direct frame {:#04x}: {} keys in {} bytes",
+            self.packet as u8,
+            self.entries.len(),
+            self.report_len
+        )
+    }
+}
+
+/// [EXPERIMENTAL] Gen 3 init feature report `00 4B` + zeros (643 bytes), sent once before the first
+/// [`DirectFrameCommand`] on the models that need it. The controller needs a short pause afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectInitCommand;
+
+impl DirectInitCommand {
+    /// Report length including the report-ID byte.
+    pub const REPORT_SIZE: usize = 643;
+}
+
+impl HidCommand for DirectInitCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::Apex2023Init
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        check_report_buffer(buffer, Self::REPORT_SIZE)?;
+        let report = &mut buffer[..Self::REPORT_SIZE];
+        report.fill(0);
+        report[1] = CommandCode::Apex2023Init as u8;
+        Ok(Self::REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        "Direct-mode init (0x4B)".to_string()
+    }
+}
+
+/// [EXPERIMENTAL] Apex M750 feature report size, report-ID byte included.
+pub const APEX_M_REPORT_SIZE: usize = 513;
+
+/// [EXPERIMENTAL] LED slots in an Apex M750 direct frame. Which slot lights which key is unknown.
+pub const APEX_M_SLOT_COUNT: usize = 132;
+
+/// One report of the Apex M750 enable sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApexMEnableStep {
+    First,
+    Second,
+    Third,
+}
+
+impl ApexMEnableStep {
+    /// The sequence in the order it is sent.
+    pub const ALL: [Self; 3] = [Self::First, Self::Second, Self::Third];
+}
+
+/// [EXPERIMENTAL] One report of the Apex M750 enable sequence that has to precede the first
+/// [`ApexMDirectCommand`]: a 513-byte feature report, all zeros but a few bytes (indexes count the report
+/// ID as 0): first `[4]=01 [6]=85`, second `[4]=03 [5]=01 [7]=FF`, third `[4]=01 [6]=85 [7]=FF`.
+///
+/// Layout from a community fork, untested on hardware (issue #276). Nothing here saves or persists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApexMEnableCommand {
+    pub step: ApexMEnableStep,
+}
+
+impl HidCommand for ApexMEnableCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::ApexMEnable
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        check_report_buffer(buffer, APEX_M_REPORT_SIZE)?;
+        let report = &mut buffer[..APEX_M_REPORT_SIZE];
+        report.fill(0);
+        match self.step {
+            ApexMEnableStep::First => {
+                report[4] = 0x01;
+                report[6] = 0x85;
+            }
+            ApexMEnableStep::Second => {
+                report[4] = 0x03;
+                report[5] = 0x01;
+                report[7] = 0xFF;
+            }
+            ApexMEnableStep::Third => {
+                report[4] = 0x01;
+                report[6] = 0x85;
+                report[7] = 0xFF;
+            }
+        }
+        Ok(APEX_M_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Apex M750 enable ({:?})", self.step)
+    }
+}
+
+/// [EXPERIMENTAL] Apex M750 direct frame, a 513-byte feature report: header `00 00 00 01 8E 01 03 06 16`,
+/// then one `R G B` triple per slot from index 9, zero padding after. A slot that maps to no LED is
+/// `FF 32 00` in the fork this comes from, but the slot-to-key map is unknown, so callers fill every slot.
+///
+/// Layout from a community fork, untested on hardware (issue #276).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApexMDirectCommand<'a> {
+    /// Exactly [`APEX_M_SLOT_COUNT`] colours.
+    pub slots: &'a [Color],
+}
+
+impl ApexMDirectCommand<'_> {
+    const HEADER: [u8; 9] = [
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        CommandCode::ApexMDirect as u8,
+        0x01,
+        0x03,
+        0x06,
+        0x16,
+    ];
+}
+
+impl HidCommand for ApexMDirectCommand<'_> {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::ApexMDirect
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        check_report_buffer(buffer, APEX_M_REPORT_SIZE)?;
+        let report = &mut buffer[..APEX_M_REPORT_SIZE];
+        report.fill(0);
+        report[..Self::HEADER.len()].copy_from_slice(&Self::HEADER);
+        let (triples, _) = report[Self::HEADER.len()..].as_chunks_mut::<3>();
+        for (triple, color) in triples.iter_mut().zip(self.slots) {
+            *triple = [color.r, color.g, color.b];
+        }
+        Ok(APEX_M_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.slots.len() != APEX_M_SLOT_COUNT {
+            return Err(Error::InvalidConfig(format!(
+                "Apex M750 frame needs {APEX_M_SLOT_COUNT} slots, got {}",
+                self.slots.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Apex M750 direct frame: {} slots", self.slots.len())
     }
 }
 
@@ -1068,6 +1373,323 @@ impl HidCommand for OnboardFileCommitCommand {
             self.profile.saturating_add(1),
             self.profile
         )
+    }
+}
+
+/// [EXPERIMENTAL] One-byte setting of the Arctis Nova 7 family: `00 <opcode> <value>` zero padded to
+/// [`HEADSET_REPORT_SIZE`], byte 0 being the hidapi report number. `code` selects the setting and fixes the
+/// accepted range of `value`: sidetone `0..=3`, microphone volume `0..=7`, auto-off any minute count.
+/// Source: community forks, never sent from `ssgg` on hardware. Never followed by the save frame `00 09`,
+/// which would persist the setting on the headset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadsetSettingCommand {
+    /// [`CommandCode::HeadsetSidetone`], [`CommandCode::HeadsetMicVolume`] or [`CommandCode::HeadsetAutoOff`].
+    pub code: CommandCode,
+    /// Wire value in the range `code` allows.
+    pub value: u8,
+}
+
+impl HeadsetSettingCommand {
+    /// Highest wire sidetone level.
+    pub const MAX_SIDETONE: u8 = 3;
+    /// Highest wire microphone volume.
+    pub const MAX_MIC_VOLUME: u8 = 7;
+}
+
+impl HidCommand for HeadsetSettingCommand {
+    fn command_code(&self) -> CommandCode {
+        self.code
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        check_report_buffer(buffer, HEADSET_REPORT_SIZE)?;
+        let report = &mut buffer[..HEADSET_REPORT_SIZE];
+        report.fill(0);
+        report[1] = self.code as u8;
+        report[2] = self.value;
+        Ok(HEADSET_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let max = match self.code {
+            CommandCode::HeadsetSidetone => Self::MAX_SIDETONE,
+            CommandCode::HeadsetMicVolume => Self::MAX_MIC_VOLUME,
+            CommandCode::HeadsetAutoOff => u8::MAX,
+            other => {
+                return Err(Error::InvalidConfig(format!(
+                    "{other} is not a headset one-byte setting"
+                )));
+            }
+        };
+        if self.value > max {
+            return Err(Error::InvalidConfig(format!(
+                "{} value {} out of range (0..={})",
+                self.code, self.value, max
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Headset setting {}: {}", self.code, self.value)
+    }
+}
+
+/// [EXPERIMENTAL] Arctis Nova 7 family status query: `00 b0` zero padded to [`HEADSET_REPORT_SIZE`]. The
+/// headset answers with an input report `b0 <power> <battery> <charge> <chat game> <chat chat> ...`.
+/// Source: community forks, never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadsetStatusQueryCommand;
+
+impl HidCommand for HeadsetStatusQueryCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::HeadsetStatus
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        check_report_buffer(buffer, HEADSET_REPORT_SIZE)?;
+        let report = &mut buffer[..HEADSET_REPORT_SIZE];
+        report.fill(0);
+        report[1] = CommandCode::HeadsetStatus as u8;
+        Ok(HEADSET_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        "Headset status query".to_string()
+    }
+}
+
+/// First byte of a Modern-family mouse command: `base`, with [`MOUSE_DONGLE_FLAG`] set for a 2.4 GHz receiver PID.
+const fn mouse_opcode(base: u8, dongle: bool) -> u8 {
+    if dongle { base | MOUSE_DONGLE_FLAG } else { base }
+}
+
+/// [EXPERIMENTAL] Modern-family mouse polling rate: `00 <0x2B> <code>`, 0x6B on a 2.4 GHz receiver PID. `code`
+/// is 4 to 1 for 125 to 1000 Hz on most models and 3 to 0 on the wireless ones, so the model table picks it.
+/// Source: community rivalcfg-derived fork, never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MousePollRateCommand {
+    pub dongle: bool,
+    pub code: u8,
+}
+
+impl MousePollRateCommand {
+    /// Highest polling-rate code any Modern-family model uses.
+    pub const MAX_CODE: u8 = 4;
+    const LEN: usize = 3;
+}
+
+impl HidCommand for MousePollRateCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::MousePollRate
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        check_report_buffer(buffer, Self::LEN)?;
+        buffer[..Self::LEN].copy_from_slice(&[
+            0x00,
+            mouse_opcode(CommandCode::MousePollRate as u8, self.dongle),
+            self.code,
+        ]);
+        Ok(Self::LEN)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.code > Self::MAX_CODE {
+            return Err(Error::InvalidConfig(format!(
+                "mouse polling-rate code {} out of range (0..={})",
+                self.code,
+                Self::MAX_CODE
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Mouse polling rate code {}", self.code)
+    }
+}
+
+/// [EXPERIMENTAL] Modern-family mouse battery query: `00 <0x92>`, 0xD2 on a 2.4 GHz receiver PID. The reply is
+/// decoded by `mice::modern::decode_battery`. Source: community rivalcfg-derived fork, never sent from `ssgg`
+/// on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseBatteryQueryCommand {
+    pub dongle: bool,
+}
+
+impl MouseBatteryQueryCommand {
+    const LEN: usize = 2;
+}
+
+impl HidCommand for MouseBatteryQueryCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::MouseBattery
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        check_report_buffer(buffer, Self::LEN)?;
+        buffer[..Self::LEN].copy_from_slice(&[0x00, mouse_opcode(CommandCode::MouseBattery as u8, self.dongle)]);
+        Ok(Self::LEN)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        "Mouse battery query".to_string()
+    }
+}
+
+/// [EXPERIMENTAL] Modern-family mouse DPI, one stage: `00 <opcode> 01 <selected> <code>`. `code` is one byte, or
+/// two little-endian bytes when `wide`, and is repeated for the Y axis when `per_axis`. The opcode is 0x2D, or
+/// 0x34 on the Rival 3 Gen 2; a 2.4 GHz receiver PID sets [`MOUSE_DONGLE_FLAG`] on it. Source: community
+/// rivalcfg-derived fork, never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseDpiCommand {
+    pub opcode: u8,
+    pub dongle: bool,
+    /// Stage the mouse switches to; the model's first preset index.
+    pub selected: u8,
+    pub code: u16,
+    pub wide: bool,
+    pub per_axis: bool,
+}
+
+impl MouseDpiCommand {
+    /// DPI opcode of every Modern-family model but the Rival 3 Gen 2.
+    pub const OPCODE: u8 = 0x2D;
+    /// DPI opcode of the Rival 3 Gen 2.
+    pub const OPCODE_RIVAL_3_GEN_2: u8 = 0x34;
+}
+
+impl HidCommand for MouseDpiCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::MouseDpi
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        let code = self.code.to_le_bytes();
+        let code = if self.wide { &code[..] } else { &code[..1] };
+        let axes = if self.per_axis { 2 } else { 1 };
+        let len = 4 + code.len() * axes;
+        check_report_buffer(buffer, len)?;
+        buffer[..4].copy_from_slice(&[0x00, mouse_opcode(self.opcode, self.dongle), 0x01, self.selected]);
+        for axis in 0..axes {
+            let start = 4 + axis * code.len();
+            buffer[start..start + code.len()].copy_from_slice(code);
+        }
+        Ok(len)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !matches!(self.opcode, Self::OPCODE | Self::OPCODE_RIVAL_3_GEN_2) {
+            return Err(Error::InvalidConfig(format!(
+                "{:#04x} is not a mouse DPI opcode",
+                self.opcode
+            )));
+        }
+        if !self.wide && self.code > u16::from(u8::MAX) {
+            return Err(Error::InvalidConfig(format!(
+                "DPI code {} does not fit in one byte",
+                self.code
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Mouse DPI code {}", self.code)
+    }
+}
+
+/// Where a Modern-family mouse takes the colour of one LED zone. Every layout is `<0x21> <selector> <RGB>`
+/// (0x61 on a 2.4 GHz receiver PID); they differ in the selector and in how far into the frame the RGB triple
+/// sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseColorLayout {
+    /// Aerox 3, Aerox 5 and Rival 3 Gen 2: one mask byte with bit `zone` set, then three zero bytes per
+    /// earlier zone.
+    Mask8,
+    /// Rival 5: a 16-bit little-endian mask with bit `zone` set, then three zero bytes per earlier zone.
+    Mask16,
+    /// The wireless Aerox, Prime Wireless and Prime Mini Wireless: `01 <zone>`.
+    Indexed,
+    /// Prime Mini, one LED: `00`.
+    Single,
+}
+
+/// [EXPERIMENTAL] Modern-family mouse LED colour for one zone, in the [`MouseColorLayout`] of the model. A
+/// 2.4 GHz receiver PID sets [`MOUSE_DONGLE_FLAG`] on the opcode. Source: community rivalcfg-derived fork,
+/// never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseColorCommand {
+    pub layout: MouseColorLayout,
+    pub dongle: bool,
+    pub zone: u8,
+    pub color: Color,
+}
+
+impl MouseColorCommand {
+    /// Opcode of every colour frame; also [`CommandCode::RgbControl`]'s byte.
+    pub const OPCODE: u8 = 0x21;
+
+    fn max_zone(&self) -> u8 {
+        match self.layout {
+            MouseColorLayout::Mask8 => 7,
+            MouseColorLayout::Mask16 => 15,
+            MouseColorLayout::Indexed => u8::MAX,
+            MouseColorLayout::Single => 0,
+        }
+    }
+}
+
+impl HidCommand for MouseColorCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::MouseColor
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        let zone = usize::from(self.zone);
+        let mut report = vec![0x00, mouse_opcode(Self::OPCODE, self.dongle)];
+        match self.layout {
+            MouseColorLayout::Mask8 => report.push(1u8 << self.zone),
+            MouseColorLayout::Mask16 => report.extend((1u16 << self.zone).to_le_bytes()),
+            MouseColorLayout::Indexed => report.extend([0x01, self.zone]),
+            MouseColorLayout::Single => report.push(0x00),
+        }
+        if matches!(self.layout, MouseColorLayout::Mask8 | MouseColorLayout::Mask16) {
+            report.resize(report.len() + 3 * zone, 0x00);
+        }
+        report.extend([self.color.r, self.color.g, self.color.b]);
+        check_report_buffer(buffer, report.len())?;
+        buffer[..report.len()].copy_from_slice(&report);
+        Ok(report.len())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.zone > self.max_zone() {
+            return Err(Error::InvalidConfig(format!(
+                "LED zone {} out of range for layout {:?} (0..={})",
+                self.zone,
+                self.layout,
+                self.max_zone()
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!("Mouse LED zone {} colour {:?}", self.zone, self.color)
     }
 }
 
@@ -2937,5 +3559,333 @@ mod tests {
             builder.parse_command_code(&actuation_data),
             Some(CommandCode::ActuationControl)
         );
+    }
+
+    #[test]
+    fn direct_frame_layout_and_padding() {
+        let entries = [(0x04, Color::new(1, 2, 3)), (0x05, Color::new(4, 5, 6))];
+        let command = DirectFrameCommand {
+            packet: CommandCode::ApexGen1Direct,
+            report_len: 643,
+            entries: &entries,
+        };
+        let mut buffer = [0xAAu8; 700];
+        let size = command.serialize(&mut buffer, HidDeviceType::Keyboard).unwrap();
+
+        assert_eq!(size, 643);
+        assert_eq!(&buffer[..11], &[0x00, 0x3A, 2, 0x04, 1, 2, 3, 0x05, 4, 5, 6]);
+        assert!(buffer[11..643].iter().all(|&b| b == 0));
+        assert_eq!(buffer[643], 0xAA, "bytes past the report are untouched");
+    }
+
+    #[test]
+    fn direct_frame_rejects_bad_packet_id_and_overflow() {
+        let entries = [(0x04, Color::RED); 4];
+        let mut buffer = [0u8; 645];
+        let wrong_packet = DirectFrameCommand {
+            packet: CommandCode::Apply,
+            report_len: 643,
+            entries: &entries,
+        };
+        assert!(wrong_packet.serialize(&mut buffer, HidDeviceType::Keyboard).is_err());
+
+        let too_small = DirectFrameCommand {
+            packet: CommandCode::Apex2023Direct,
+            report_len: 18, // header 3 + 4 entries * 4 = 19 bytes needed
+            entries: &entries,
+        };
+        assert!(too_small.serialize(&mut buffer, HidDeviceType::Keyboard).is_err());
+
+        let short_buffer = DirectFrameCommand {
+            packet: CommandCode::Apex2023Direct,
+            report_len: 645,
+            entries: &entries,
+        };
+        assert!(
+            short_buffer
+                .serialize(&mut buffer[..100], HidDeviceType::Keyboard)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn direct_init_is_4b_feature_report() {
+        let mut buffer = [0xAAu8; 643];
+        let size = DirectInitCommand
+            .serialize(&mut buffer, HidDeviceType::Keyboard)
+            .unwrap();
+
+        assert_eq!(size, 643);
+        assert_eq!(&buffer[..2], &[0x00, 0x4B]);
+        assert!(buffer[2..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn direct_frame_fits_the_513_byte_apex_9_report() {
+        let entries = [(0x04, Color::new(9, 8, 7)); 112];
+        let command = DirectFrameCommand {
+            packet: CommandCode::Apex2023Direct,
+            report_len: 513,
+            entries: &entries,
+        };
+        let mut buffer = [0u8; 513];
+        assert_eq!(command.serialize(&mut buffer, HidDeviceType::Keyboard).unwrap(), 513);
+        assert_eq!(&buffer[..7], &[0x00, 0x40, 0x70, 0x04, 9, 8, 7]);
+        assert!(buffer[3 + 112 * 4..].iter().all(|&b| b == 0));
+    }
+
+    fn m750_report(command: &dyn HidCommand) -> Vec<u8> {
+        let mut buffer = vec![0xAAu8; APEX_M_REPORT_SIZE + 4];
+        let size = command.serialize(&mut buffer, HidDeviceType::Keyboard).unwrap();
+        assert_eq!(size, APEX_M_REPORT_SIZE);
+        assert!(
+            buffer[APEX_M_REPORT_SIZE..].iter().all(|&b| b == 0xAA),
+            "bytes past the report are untouched"
+        );
+        buffer.truncate(APEX_M_REPORT_SIZE);
+        buffer
+    }
+
+    #[test]
+    fn apex_m750_enable_reports_set_only_their_bytes() {
+        let expected: [(ApexMEnableStep, &[(usize, u8)]); 3] = [
+            (ApexMEnableStep::First, &[(4, 0x01), (6, 0x85)]),
+            (ApexMEnableStep::Second, &[(4, 0x03), (5, 0x01), (7, 0xFF)]),
+            (ApexMEnableStep::Third, &[(4, 0x01), (6, 0x85), (7, 0xFF)]),
+        ];
+        assert_eq!(
+            ApexMEnableStep::ALL,
+            [ApexMEnableStep::First, ApexMEnableStep::Second, ApexMEnableStep::Third]
+        );
+        for (step, set) in expected {
+            let report = m750_report(&ApexMEnableCommand { step });
+            for (i, &byte) in report.iter().enumerate() {
+                let want = set.iter().find(|(at, _)| *at == i).map_or(0, |(_, value)| *value);
+                assert_eq!(byte, want, "{step:?} byte {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn apex_m750_direct_frame_header_slots_and_padding() {
+        let mut slots = [Color::new(1, 2, 3); APEX_M_SLOT_COUNT];
+        slots[APEX_M_SLOT_COUNT - 1] = Color::new(4, 5, 6);
+        let report = m750_report(&ApexMDirectCommand { slots: &slots });
+
+        assert_eq!(&report[..9], &[0x00, 0x00, 0x00, 0x01, 0x8E, 0x01, 0x03, 0x06, 0x16]);
+        assert_eq!(&report[9..15], &[1, 2, 3, 1, 2, 3]);
+        let last = 9 + (APEX_M_SLOT_COUNT - 1) * 3;
+        assert_eq!(&report[last..last + 3], &[4, 5, 6]);
+        assert!(report[last + 3..].iter().all(|&b| b == 0));
+        assert_eq!(report.len() - (last + 3), 513 - 9 - 132 * 3);
+    }
+
+    #[test]
+    fn apex_m750_direct_frame_rejects_wrong_slot_count_and_short_buffer() {
+        let mut buffer = [0u8; APEX_M_REPORT_SIZE];
+        let few = [Color::RED; APEX_M_SLOT_COUNT - 1];
+        assert!(
+            ApexMDirectCommand { slots: &few }
+                .serialize(&mut buffer, HidDeviceType::Keyboard)
+                .is_err()
+        );
+
+        let slots = [Color::RED; APEX_M_SLOT_COUNT];
+        let frame = ApexMDirectCommand { slots: &slots };
+        assert!(frame.serialize(&mut buffer[..512], HidDeviceType::Keyboard).is_err());
+        let enable = ApexMEnableCommand {
+            step: ApexMEnableStep::First,
+        };
+        assert!(enable.serialize(&mut buffer[..512], HidDeviceType::Keyboard).is_err());
+    }
+
+    #[test]
+    fn direct_packet_ids_are_known_command_codes() {
+        for (byte, code) in [
+            (0x40, CommandCode::Apex2023Direct),
+            (0x61, CommandCode::Apex2023DirectWireless),
+            (0x3A, CommandCode::ApexGen1Direct),
+            (0x4B, CommandCode::Apex2023Init),
+        ] {
+            assert_eq!(CommandCode::from_report_byte(byte), Some(code));
+            assert_eq!(code as u8, byte);
+        }
+    }
+
+    #[test]
+    fn tag_only_m750_codes_are_not_parsed_from_report_bytes() {
+        // Bytes 4 and 5 of the M750 headers, not command bytes at offset 1: parsing them would misread
+        // unrelated reports.
+        assert_eq!(CommandCode::from_report_byte(0x8E), None);
+        assert_eq!(CommandCode::from_report_byte(0x01), None);
+    }
+
+    fn headset_report(command: &dyn HidCommand) -> Vec<u8> {
+        let mut buffer = vec![0xAAu8; HEADSET_REPORT_SIZE + 4];
+        let size = command.serialize(&mut buffer, HidDeviceType::Headset).unwrap();
+        assert_eq!(size, HEADSET_REPORT_SIZE);
+        assert!(
+            buffer[HEADSET_REPORT_SIZE..].iter().all(|&b| b == 0xAA),
+            "bytes past the report are untouched"
+        );
+        buffer.truncate(HEADSET_REPORT_SIZE);
+        buffer
+    }
+
+    #[test]
+    fn headset_setting_frames_are_64_byte_zero_padded() {
+        for (code, value, opcode) in [
+            (CommandCode::HeadsetSidetone, 0, 0x39),
+            (CommandCode::HeadsetSidetone, 3, 0x39),
+            (CommandCode::HeadsetMicVolume, 7, 0x37),
+            (CommandCode::HeadsetAutoOff, 0, 0xA3),
+            (CommandCode::HeadsetAutoOff, 255, 0xA3),
+        ] {
+            let report = headset_report(&HeadsetSettingCommand { code, value });
+            assert_eq!(&report[..3], &[0x00, opcode, value]);
+            assert!(report[3..].iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn headset_setting_rejects_out_of_range_and_foreign_codes() {
+        let mut buffer = [0u8; HEADSET_REPORT_SIZE];
+        for (code, value) in [
+            (CommandCode::HeadsetSidetone, 4),
+            (CommandCode::HeadsetMicVolume, 8),
+            (CommandCode::Apply, 0),
+            (CommandCode::HeadsetStatus, 0),
+        ] {
+            let command = HeadsetSettingCommand { code, value };
+            assert!(command.serialize(&mut buffer, HidDeviceType::Headset).is_err());
+        }
+        let valid = HeadsetSettingCommand {
+            code: CommandCode::HeadsetSidetone,
+            value: 1,
+        };
+        assert!(valid.serialize(&mut buffer[..10], HidDeviceType::Headset).is_err());
+    }
+
+    #[test]
+    fn headset_status_query_is_00_b0_padded() {
+        let report = headset_report(&HeadsetStatusQueryCommand);
+        assert_eq!(&report[..2], &[0x00, 0xB0]);
+        assert!(report[2..].iter().all(|&b| b == 0));
+        let mut short = [0u8; 8];
+        assert!(
+            HeadsetStatusQueryCommand
+                .serialize(&mut short, HidDeviceType::Headset)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn headset_opcodes_are_known_command_codes() {
+        for (byte, code) in [
+            (0x39, CommandCode::HeadsetSidetone),
+            (0x37, CommandCode::HeadsetMicVolume),
+            (0xA3, CommandCode::HeadsetAutoOff),
+            (0xB0, CommandCode::HeadsetStatus),
+        ] {
+            assert_eq!(CommandCode::from_report_byte(byte), Some(code));
+            assert_eq!(code as u8, byte);
+            assert!(code.to_string().ends_with("_EXPERIMENTAL"));
+        }
+    }
+
+    fn mouse_report(command: &dyn HidCommand) -> Vec<u8> {
+        let mut buffer = vec![0xAAu8; MOUSE_REPORT_BUFFER_SIZE];
+        let size = command.serialize(&mut buffer, HidDeviceType::Mouse).unwrap();
+        assert!(
+            buffer[size..].iter().all(|&b| b == 0xAA),
+            "bytes past the report are untouched"
+        );
+        buffer.truncate(size);
+        buffer
+    }
+
+    #[test]
+    fn mouse_reports_are_unpadded_and_start_with_the_report_id() {
+        assert_eq!(
+            mouse_report(&MousePollRateCommand { dongle: false, code: 2 }),
+            [0x00, 0x2B, 0x02]
+        );
+        assert_eq!(mouse_report(&MouseBatteryQueryCommand { dongle: false }), [0x00, 0x92]);
+        let dpi = MouseDpiCommand {
+            opcode: MouseDpiCommand::OPCODE,
+            dongle: false,
+            selected: 0,
+            code: 0x0168,
+            wide: true,
+            per_axis: false,
+        };
+        assert_eq!(mouse_report(&dpi), [0x00, 0x2D, 0x01, 0x00, 0x68, 0x01]);
+        let color = MouseColorCommand {
+            layout: MouseColorLayout::Mask16,
+            dongle: true,
+            zone: 9,
+            color: Color::new(1, 2, 3),
+        };
+        let report = mouse_report(&color);
+        assert_eq!(report.len(), 34);
+        assert_eq!(report[..4], [0x00, 0x61, 0x00, 0x02]);
+        assert_eq!(report[31..], [1, 2, 3]);
+        assert!(HidDeviceType::Mouse.includes_report_id());
+    }
+
+    #[test]
+    fn mouse_commands_reject_bad_arguments_and_small_buffers() {
+        let mut buffer = [0u8; MOUSE_REPORT_BUFFER_SIZE];
+        let poll = MousePollRateCommand { dongle: false, code: 5 };
+        assert!(poll.serialize(&mut buffer, HidDeviceType::Mouse).is_err());
+        for opcode in [0x11, 0x2B, 0x00] {
+            let dpi = MouseDpiCommand {
+                opcode,
+                dongle: false,
+                selected: 0,
+                code: 1,
+                wide: false,
+                per_axis: false,
+            };
+            assert!(
+                dpi.serialize(&mut buffer, HidDeviceType::Mouse).is_err(),
+                "{opcode:#04x}"
+            );
+        }
+        let narrow = MouseDpiCommand {
+            opcode: MouseDpiCommand::OPCODE,
+            dongle: false,
+            selected: 0,
+            code: 0x100,
+            wide: false,
+            per_axis: false,
+        };
+        assert!(narrow.serialize(&mut buffer, HidDeviceType::Mouse).is_err());
+        for (layout, zone) in [
+            (MouseColorLayout::Mask8, 8),
+            (MouseColorLayout::Mask16, 16),
+            (MouseColorLayout::Single, 1),
+        ] {
+            let color = MouseColorCommand {
+                layout,
+                dongle: false,
+                zone,
+                color: Color::BLACK,
+            };
+            assert!(color.serialize(&mut buffer, HidDeviceType::Mouse).is_err());
+        }
+        assert!(
+            MouseBatteryQueryCommand { dongle: false }
+                .serialize(&mut buffer[..1], HidDeviceType::Mouse)
+                .is_err()
+        );
+        let last_zone = MouseColorCommand {
+            layout: MouseColorLayout::Mask16,
+            dongle: false,
+            zone: 15,
+            color: Color::BLACK,
+        };
+        assert!(last_zone.serialize(&mut buffer[..20], HidDeviceType::Mouse).is_err());
+        assert!(last_zone.serialize(&mut buffer, HidDeviceType::Mouse).is_ok());
     }
 }

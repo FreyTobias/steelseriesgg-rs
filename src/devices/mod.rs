@@ -7,6 +7,7 @@ pub mod headsets;
 pub mod hid_reports;
 pub mod key_mapping;
 pub mod keyboards;
+pub mod mice;
 pub mod zone_mapping;
 
 use parking_lot::Mutex;
@@ -31,6 +32,7 @@ pub use zone_mapping::{ZoneEffect, ZoneFallback, ZoneInfo, ZoneMapping, ZonePosi
 pub enum DeviceType {
     Keyboard,
     Headset,
+    Mouse,
     Unknown,
 }
 
@@ -39,6 +41,7 @@ impl fmt::Display for DeviceType {
         match self {
             DeviceType::Keyboard => write!(f, "Keyboard"),
             DeviceType::Headset => write!(f, "Headset"),
+            DeviceType::Mouse => write!(f, "Mouse"),
             DeviceType::Unknown => write!(f, "Unknown"),
         }
     }
@@ -402,7 +405,8 @@ pub mod product_ids {
     pub const APEX_PRO_MINI_2024: u16 = 0x1648;
     pub const APEX_5_2024: u16 = 0x1650;
     pub const APEX_7_2024: u16 = 0x1652;
-    // Apex M750 (issue #276, lsusb name). Detect-only: no RGB protocol known.
+    // Apex M750 (issue #276, lsusb name). [EXPERIMENTAL] solid-colour protocol from a community fork, see
+    // keyboards::apex_m750.
     pub const APEX_M750: u16 = 0x0616;
 
     // Headsets - Arctis Series
@@ -441,13 +445,50 @@ pub mod product_ids {
     // Arctis Nova 3 Wireless (unverified — GG firmware names only).
     pub const ARCTIS_NOVA_3_WIRELESS_RX: u16 = 0x2267;
     pub const ARCTIS_NOVA_3_WIRELESS_TX: u16 = 0x2269;
-    // Arctis Nova 7 seen as 0x22A1 (issue #276, lsusb name; variant unknown). Detect-only.
+    // Arctis Nova 7 seen as 0x22A1 (issue #276, lsusb name). [EXPERIMENTAL] protocol, see headsets::nova7.
     pub const ARCTIS_NOVA_7_22A1: u16 = 0x22A1;
+    // Arctis Nova 7 family variants. PIDs from community forks, untested; behaviour table in headsets::nova7.
+    pub const ARCTIS_NOVA_7_DIABLO_IV: u16 = 0x223A;
+    pub const ARCTIS_NOVA_7X_V2: u16 = 0x2258;
+    pub const ARCTIS_NOVA_7_WOW: u16 = 0x227A;
+    pub const ARCTIS_NOVA_7_WIRELESS_GEN2: u16 = 0x227E;
+    pub const ARCTIS_NOVA_7P_GEN2: u16 = 0x2298;
+    pub const ARCTIS_NOVA_7X_GEN2: u16 = 0x229E;
+    pub const ARCTIS_NOVA_7X_ALT: u16 = 0x22A4;
+    pub const ARCTIS_NOVA_7X_ALT_V2: u16 = 0x22A5;
+    pub const ARCTIS_NOVA_7P_V2: u16 = 0x22A7;
+    pub const ARCTIS_NOVA_7_DIABLO_IV_V2: u16 = 0x22A9;
+    pub const ARCTIS_NOVA_7X_V2_ALT: u16 = 0x22AD;
+    // Mice, Modern family. PIDs from a community rivalcfg-derived fork, untested; behaviour table in mice::modern.
+    pub const AEROX_3: u16 = 0x1836;
+    pub const AEROX_3_WIRELESS: u16 = 0x183A;
+    pub const AEROX_3_WIRELESS_DONGLE: u16 = 0x1838;
+    pub const AEROX_3_WIRELESS_CS2: u16 = 0x187A;
+    pub const AEROX_3_WIRELESS_CS2_DONGLE: u16 = 0x1878;
+    pub const AEROX_5: u16 = 0x1850;
+    pub const AEROX_5_WIRELESS: u16 = 0x1854;
+    pub const AEROX_5_WIRELESS_DONGLE: u16 = 0x1852;
+    pub const AEROX_5_WIRELESS_DESTINY_2: u16 = 0x185E;
+    pub const AEROX_5_WIRELESS_DESTINY_2_DONGLE: u16 = 0x185C;
+    pub const AEROX_5_WIRELESS_DIABLO_IV: u16 = 0x1862;
+    pub const AEROX_5_WIRELESS_DIABLO_IV_DONGLE: u16 = 0x1860;
+    pub const AEROX_9_WIRELESS: u16 = 0x185A;
+    pub const AEROX_9_WIRELESS_DONGLE: u16 = 0x1858;
+    pub const AEROX_9_WIRELESS_WOW: u16 = 0x1876;
+    pub const AEROX_9_WIRELESS_WOW_DONGLE: u16 = 0x1874;
+    pub const PRIME_MINI: u16 = 0x184D;
+    pub const PRIME_MINI_WIRELESS: u16 = 0x184A;
+    pub const PRIME_MINI_WIRELESS_DONGLE: u16 = 0x1848;
+    pub const PRIME_WIRELESS: u16 = 0x1842;
+    pub const PRIME_WIRELESS_DONGLE: u16 = 0x1840;
+    pub const RIVAL_3_GEN_2: u16 = 0x1870;
+    pub const RIVAL_5: u16 = 0x183C;
+    pub const RIVAL_5_DESTINY: u16 = 0x183E;
 }
 
 /// Devices registered for detection only: no protocol is known, so `ssgg` must not write to them.
 pub fn is_detect_only(product_id: u16) -> bool {
-    matches!(product_id, product_ids::APEX_M750 | product_ids::ARCTIS_NOVA_7_22A1)
+    matches!(product_id, product_ids::ARCTIS_NOVA_PRO_OMNI)
 }
 
 /// Get device type from product ID.
@@ -506,7 +547,44 @@ pub fn device_type_from_product_id(product_id: u16) -> DeviceType {
         | ARCTIS_NOVA_PRO_OMNI
         | ARCTIS_NOVA_3_WIRELESS_RX
         | ARCTIS_NOVA_3_WIRELESS_TX
-        | ARCTIS_NOVA_7_22A1 => DeviceType::Headset,
+        | ARCTIS_NOVA_7_22A1
+        | ARCTIS_NOVA_7_DIABLO_IV
+        | ARCTIS_NOVA_7X_V2
+        | ARCTIS_NOVA_7_WOW
+        | ARCTIS_NOVA_7_WIRELESS_GEN2
+        | ARCTIS_NOVA_7P_GEN2
+        | ARCTIS_NOVA_7X_GEN2
+        | ARCTIS_NOVA_7X_ALT
+        | ARCTIS_NOVA_7X_ALT_V2
+        | ARCTIS_NOVA_7P_V2
+        | ARCTIS_NOVA_7_DIABLO_IV_V2
+        | ARCTIS_NOVA_7X_V2_ALT => DeviceType::Headset,
+
+        // Mice (Modern family)
+        AEROX_3
+        | AEROX_3_WIRELESS
+        | AEROX_3_WIRELESS_DONGLE
+        | AEROX_3_WIRELESS_CS2
+        | AEROX_3_WIRELESS_CS2_DONGLE
+        | AEROX_5
+        | AEROX_5_WIRELESS
+        | AEROX_5_WIRELESS_DONGLE
+        | AEROX_5_WIRELESS_DESTINY_2
+        | AEROX_5_WIRELESS_DESTINY_2_DONGLE
+        | AEROX_5_WIRELESS_DIABLO_IV
+        | AEROX_5_WIRELESS_DIABLO_IV_DONGLE
+        | AEROX_9_WIRELESS
+        | AEROX_9_WIRELESS_DONGLE
+        | AEROX_9_WIRELESS_WOW
+        | AEROX_9_WIRELESS_WOW_DONGLE
+        | PRIME_MINI
+        | PRIME_MINI_WIRELESS
+        | PRIME_MINI_WIRELESS_DONGLE
+        | PRIME_WIRELESS
+        | PRIME_WIRELESS_DONGLE
+        | RIVAL_3_GEN_2
+        | RIVAL_5
+        | RIVAL_5_DESTINY => DeviceType::Mouse,
 
         _ => DeviceType::Unknown,
     }
@@ -565,6 +643,41 @@ pub fn device_name_from_product_id(product_id: u16) -> &'static str {
         ARCTIS_NOVA_3_WIRELESS_RX => "Arctis Nova 3 Wireless (RX)",
         ARCTIS_NOVA_3_WIRELESS_TX => "Arctis Nova 3 Wireless (TX)",
         ARCTIS_NOVA_7_22A1 => "Arctis Nova 7",
+        ARCTIS_NOVA_7_DIABLO_IV => "Arctis Nova 7 Diablo IV",
+        ARCTIS_NOVA_7X_V2 => "Arctis Nova 7X v2",
+        ARCTIS_NOVA_7_WOW => "Arctis Nova 7 World of Warcraft",
+        ARCTIS_NOVA_7_WIRELESS_GEN2 => "Arctis Nova 7 Wireless Gen 2",
+        ARCTIS_NOVA_7P_GEN2 => "Arctis Nova 7P Gen 2",
+        ARCTIS_NOVA_7X_GEN2 => "Arctis Nova 7X Gen 2",
+        ARCTIS_NOVA_7X_ALT => "Arctis Nova 7X (alt)",
+        ARCTIS_NOVA_7X_ALT_V2 => "Arctis Nova 7X (alt v2)",
+        ARCTIS_NOVA_7P_V2 => "Arctis Nova 7P v2",
+        ARCTIS_NOVA_7_DIABLO_IV_V2 => "Arctis Nova 7 Diablo IV v2",
+        ARCTIS_NOVA_7X_V2_ALT => "Arctis Nova 7X v2 (alt)",
+        AEROX_3 => "Aerox 3",
+        AEROX_3_WIRELESS => "Aerox 3 Wireless (wired)",
+        AEROX_3_WIRELESS_DONGLE => "Aerox 3 Wireless (2.4 GHz)",
+        AEROX_3_WIRELESS_CS2 => "Aerox 3 Wireless CS2 Dragon Lore Edition (wired)",
+        AEROX_3_WIRELESS_CS2_DONGLE => "Aerox 3 Wireless CS2 Dragon Lore Edition (2.4 GHz)",
+        AEROX_5 => "Aerox 5",
+        AEROX_5_WIRELESS => "Aerox 5 Wireless (wired)",
+        AEROX_5_WIRELESS_DONGLE => "Aerox 5 Wireless (2.4 GHz)",
+        AEROX_5_WIRELESS_DESTINY_2 => "Aerox 5 Wireless Destiny 2 Edition (wired)",
+        AEROX_5_WIRELESS_DESTINY_2_DONGLE => "Aerox 5 Wireless Destiny 2 Edition (2.4 GHz)",
+        AEROX_5_WIRELESS_DIABLO_IV => "Aerox 5 Wireless Diablo IV Edition (wired)",
+        AEROX_5_WIRELESS_DIABLO_IV_DONGLE => "Aerox 5 Wireless Diablo IV Edition (2.4 GHz)",
+        AEROX_9_WIRELESS => "Aerox 9 Wireless (wired)",
+        AEROX_9_WIRELESS_DONGLE => "Aerox 9 Wireless (2.4 GHz)",
+        AEROX_9_WIRELESS_WOW => "Aerox 9 Wireless WOW Edition (wired)",
+        AEROX_9_WIRELESS_WOW_DONGLE => "Aerox 9 Wireless WOW Edition (2.4 GHz)",
+        PRIME_MINI => "Prime Mini",
+        PRIME_MINI_WIRELESS => "Prime Mini Wireless (wired)",
+        PRIME_MINI_WIRELESS_DONGLE => "Prime Mini Wireless (2.4 GHz)",
+        PRIME_WIRELESS => "Prime Wireless (wired)",
+        PRIME_WIRELESS_DONGLE => "Prime Wireless (2.4 GHz)",
+        RIVAL_3_GEN_2 => "Rival 3 Gen 2",
+        RIVAL_5 => "Rival 5",
+        RIVAL_5_DESTINY => "Rival 5 Destiny Edition",
         _ => "Unknown SteelSeries Device",
     }
 }
@@ -643,15 +756,32 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_276_devices_are_named_and_detect_only() {
+    fn test_issue_276_devices_are_named_and_only_the_omni_stays_detect_only() {
         use product_ids::*;
 
         assert_eq!(device_type_from_product_id(APEX_M750), DeviceType::Keyboard);
         assert_eq!(device_name_from_product_id(APEX_M750), "Apex M750");
         assert_eq!(device_type_from_product_id(ARCTIS_NOVA_7_22A1), DeviceType::Headset);
         assert_eq!(device_name_from_product_id(ARCTIS_NOVA_7_22A1), "Arctis Nova 7");
-        assert!(is_detect_only(APEX_M750) && is_detect_only(ARCTIS_NOVA_7_22A1));
+        // 0x22A1 has an [EXPERIMENTAL] protocol since the Nova 7 family landed; the Omni has none known,
+        // so it replaces it here and GenericHeadset's untested `06 xx` bytes are never sent to it.
+        // The M750 has an [EXPERIMENTAL] solid-colour protocol (keyboards::apex_m750), so it is no longer
+        // detect-only; the Omni still has none known.
+        assert!(is_detect_only(ARCTIS_NOVA_PRO_OMNI));
+        assert!(!is_detect_only(APEX_M750));
+        assert!(!is_detect_only(ARCTIS_NOVA_7_22A1));
         assert!(!is_detect_only(APEX_PRO_TKL_2023));
+    }
+
+    #[test]
+    fn test_nova_7_family_pids_are_named_headsets() {
+        for entry in headsets::nova7::NOVA7_MODELS {
+            assert_eq!(device_type_from_product_id(entry.product_id), DeviceType::Headset);
+            assert_ne!(
+                device_name_from_product_id(entry.product_id),
+                "Unknown SteelSeries Device"
+            );
+        }
     }
 
     #[test]

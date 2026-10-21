@@ -43,6 +43,24 @@ pub(crate) enum Commands {
         action: ActuationAction,
     },
 
+    /// Control headsets (Arctis Nova 7 family only, EXPERIMENTAL and untested on hardware)
+    Headset {
+        #[command(subcommand)]
+        action: HeadsetAction,
+    },
+
+    /// Control Modern-family mice: Aerox, Prime Mini/Wireless, Rival 3 Gen 2, Rival 5 (EXPERIMENTAL and untested on hardware)
+    Mouse {
+        #[command(subcommand)]
+        action: MouseAction,
+    },
+
+    /// Remap keys on a SteelSeries keyboard (Linux, needs the `remap` feature; EXPERIMENTAL and never run on hardware)
+    Remap {
+        #[command(subcommand)]
+        action: RemapAction,
+    },
+
     /// Manage profiles
     Profile {
         #[command(subcommand)]
@@ -436,6 +454,54 @@ pub(crate) enum RgbAction {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum HeadsetAction {
+    /// Show battery, connection, charging and ChatMix
+    Status,
+
+    /// Set sidetone (0-100, mapped onto the headset's 4 steps)
+    Sidetone {
+        /// Sidetone level
+        level: u8,
+    },
+
+    /// Set the inactivity auto-off timeout (0 = disabled)
+    AutoOff {
+        /// Timeout in minutes
+        minutes: u8,
+    },
+
+    /// Set microphone volume (0-100, mapped onto the headset's 8 steps)
+    MicVolume {
+        /// Microphone volume
+        level: u8,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MouseAction {
+    /// Show the battery level of a wireless model
+    Status,
+
+    /// Set the DPI (range and step depend on the model, e.g. 100 to 18000 in steps of 100)
+    Dpi {
+        /// DPI value
+        value: u16,
+    },
+
+    /// Set the USB polling rate of the mouse itself (not the OS-level `pollrate` command)
+    PollRate {
+        /// Rate in Hz: 125, 250, 500 or 1000
+        hz: u16,
+    },
+
+    /// Set every LED zone to one colour
+    Color {
+        /// Colour name or hex (e.g. red, FF8800)
+        color: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum ActuationAction {
     /// Set actuation point for all keys (global)
     Set {
@@ -522,6 +588,16 @@ pub(crate) enum ProfileAction {
         /// Profile name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RemapAction {
+    /// Grab the keyboard and apply the `[remap]` bindings from config.toml until Ctrl-C or the escape chord
+    /// (hold both Ctrl and both Shift keys for 2 seconds)
+    Run,
+
+    /// Print the configured bindings after validating them
+    List,
 }
 
 #[cfg(feature = "audio")]
@@ -964,5 +1040,25 @@ mod tests {
             !OnboardAction::Encode(encode_args()).needs_keyboard(),
             "encode writes bytes and sends nothing"
         );
+    }
+
+    #[test]
+    fn mouse_poll_rate_is_a_separate_command_from_the_os_pollrate() {
+        let parsed = Cli::try_parse_from(["ssgg", "mouse", "poll-rate", "1000"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Mouse {
+                action: MouseAction::PollRate { hz: 1000 }
+            }
+        ));
+        let parsed = Cli::try_parse_from(["ssgg", "mouse", "dpi", "800"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Mouse {
+                action: MouseAction::Dpi { value: 800 }
+            }
+        ));
+        assert!(Cli::try_parse_from(["ssgg", "mouse", "save"]).is_err());
+        assert!(Cli::try_parse_from(["ssgg", "pollrate", "mouse", "1000"]).is_ok());
     }
 }

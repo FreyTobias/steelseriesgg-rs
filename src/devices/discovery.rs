@@ -5,14 +5,19 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn};
 
+use super::headsets::nova7::{Nova7Headset, nova7_model};
 use super::headsets::{GenericHeadset, Headset};
 use super::hid_reports::ConnectionHealth;
 use super::keyboards::apex::Apex3Tkl;
+use super::keyboards::apex_m750::{ApexM750, CONTROL_INTERFACE as APEX_M750_CONTROL_INTERFACE};
 use super::keyboards::apex_pro_tkl_2023::ApexProTkl2023;
 use super::keyboards::{GenericKeyboard, Keyboard};
+use super::mice::Mouse;
+use super::mice::modern::{ModernMouse, model_for as mouse_model};
 use super::product_ids::{
-    APEX_3_TKL, APEX_7, APEX_PRO, APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2,
-    APEX_PRO_TKL_2024, APEX_PRO_TKL_WIRELESS_2024, APEX_PRO_TKL_WIRELESS_2024_DONGLE,
+    APEX_3_TKL, APEX_5, APEX_7, APEX_7_TKL, APEX_9_MINI, APEX_9_TKL, APEX_M750, APEX_PRO, APEX_PRO_2024, APEX_PRO_TKL,
+    APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2, APEX_PRO_TKL_2024,
+    APEX_PRO_TKL_WIRELESS_2024, APEX_PRO_TKL_WIRELESS_2024_DONGLE,
 };
 use super::{
     DeviceInfo, DeviceType, STEELSERIES_CONTROL_USAGE_PAGE, device_name_from_product_id, device_type_from_product_id,
@@ -33,6 +38,22 @@ use crate::{Error, Result, STEELSERIES_VENDOR_ID};
 ///    (kept as a fallback since the wireless PIDs are unverified against this ranking).
 /// 4. Standard OS-facing pages (Generic Desktop `0x0001`, Consumer `0x000C`) never qualify.
 fn control_score(usage_page: u16, interface_number: i32, product_id: u16, device_type: DeviceType) -> Option<u32> {
+    // [EXPERIMENTAL] The M750 exposes many interfaces and only interface 2 takes the lighting feature
+    // reports (community fork, untested), so no other interface qualifies, vendor page or not.
+    if product_id == APEX_M750 {
+        return (interface_number == APEX_M750_CONTROL_INTERFACE).then_some(if usage_page >= 0xFF00 {
+            3_000_000
+        } else {
+            1_000_000
+        });
+    }
+    // [EXPERIMENTAL] Modern-family mice take their commands on one interface per model (community fork,
+    // untested), so no other interface qualifies, vendor page or not.
+    if device_type == DeviceType::Mouse {
+        return mouse_model(product_id)
+            .filter(|model| model.interface_number == interface_number)
+            .map(|_| if usage_page >= 0xFF00 { 3_000_000 } else { 1_000_000 });
+    }
     if usage_page == STEELSERIES_CONTROL_USAGE_PAGE {
         return Some(3_000_000 - interface_number.max(0) as u32);
     }
@@ -48,7 +69,7 @@ fn control_score(usage_page: u16, interface_number: i32, product_id: u16, device
         }
         DeviceType::Keyboard => 1,
         DeviceType::Headset => 3,
-        DeviceType::Unknown => return None,
+        DeviceType::Mouse | DeviceType::Unknown => return None,
     };
     if interface_number == fallback_interface {
         Some(1_000_000)
@@ -473,6 +494,7 @@ impl DeviceManager {
             KeyboardClass::Apex3Tkl => Ok(Box::new(Apex3Tkl::new(generic_keyboard))),
             KeyboardClass::ApexProTkl2023 => Ok(Box::new(ApexProTkl2023::new(generic_keyboard))),
             KeyboardClass::Apex7 => Ok(Box::new(super::keyboards::apex_7::Apex7::new(generic_keyboard))),
+            KeyboardClass::ApexM750 => Ok(Box::new(ApexM750::new(generic_keyboard))),
             KeyboardClass::Generic => Ok(Box::new(generic_keyboard)),
         }
     }
@@ -541,7 +563,28 @@ impl DeviceManager {
         reject_detect_only(info)?;
 
         let hid_device = self.open_device(info)?;
-        Ok(Box::new(GenericHeadset::new(info.clone(), hid_device)))
+        Ok(match nova7_model(info.product_id) {
+            Some(model) => Box::new(Nova7Headset::new(info.clone(), hid_device, model)),
+            None => Box::new(GenericHeadset::new(info.clone(), hid_device)),
+        })
+    }
+
+    /// Open a mouse device and return a boxed Mouse trait object. [EXPERIMENTAL] Modern family only.
+    pub fn open_mouse(&self, info: &DeviceInfo) -> Result<Box<dyn Mouse>> {
+        if info.device_type != DeviceType::Mouse {
+            return Err(Error::DeviceCommunication(format!(
+                "Device {} is not a mouse",
+                info.name
+            )));
+        }
+        reject_detect_only(info)?;
+        let model = mouse_model(info.product_id).ok_or(Error::UnsupportedDevice {
+            vendor_id: info.vendor_id,
+            product_id: info.product_id,
+        })?;
+
+        let hid_device = self.open_device(info)?;
+        Ok(Box::new(ModernMouse::new(info.clone(), hid_device, model)))
     }
 
     // === Hot-plug monitoring methods ===
@@ -947,12 +990,14 @@ pub fn print_device_summary(manager: &DeviceManager) {
 /// keyboard only reads a profile off the board when its product ID is built as the class that speaks
 /// the protocol. `Apex7` is the on-board class, and it is built for the board the frames are known from
 /// and for nothing else - the `0x1614` / `0x1616` / `0x1618` platform siblings keep lighting only and
-/// answer no codec, because nobody has read an answer from them.
+/// answer no codec, because nobody has read an answer from them. `0x1614` and `0x1618` are built as
+/// `ApexProTkl2023` for their `[EXPERIMENTAL]` direct lighting frame, which answers no codec either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardClass {
     Apex3Tkl,
     ApexProTkl2023,
     Apex7,
+    ApexM750,
     Generic,
 }
 
@@ -966,8 +1011,15 @@ pub fn keyboard_class(product_id: u16) -> KeyboardClass {
         | APEX_PRO_TKL_2023_WIRELESS_2
         | APEX_PRO_TKL_2024
         | APEX_PRO_TKL_WIRELESS_2024_DONGLE
-        | APEX_PRO_TKL_WIRELESS_2024 => KeyboardClass::ApexProTkl2023,
+        | APEX_PRO_TKL_WIRELESS_2024
+        | APEX_9_TKL
+        | APEX_9_MINI
+        | APEX_PRO_TKL
+        | APEX_7_TKL
+        | APEX_5
+        | APEX_PRO_2024 => KeyboardClass::ApexProTkl2023,
         APEX_7 => KeyboardClass::Apex7,
+        APEX_M750 => KeyboardClass::ApexM750,
         _ => KeyboardClass::Generic,
     }
 }
@@ -1307,6 +1359,39 @@ mod tests {
     }
 
     #[test]
+    fn nova7_pids_route_to_nova7_and_pick_the_0xffc0_collection() {
+        use super::super::headsets::nova7::NOVA7_MODELS;
+        use super::super::product_ids::{ARCTIS_NOVA_7_22A1, ARCTIS_NOVA_7_RX, ARCTIS_NOVA_PRO_OMNI};
+
+        for m in NOVA7_MODELS {
+            assert!(nova7_model(m.product_id).is_some(), "{:#06x}", m.product_id);
+            assert!(!super::super::is_detect_only(m.product_id), "{:#06x}", m.product_id);
+            let vendor = control_score(0xFFC0, 3, m.product_id, DeviceType::Headset).unwrap();
+            let other_vendor = control_score(0xFFC1, 0, m.product_id, DeviceType::Headset).unwrap();
+            let standard = control_score(0x000C, 0, m.product_id, DeviceType::Headset);
+            assert!(vendor > other_vendor);
+            assert_eq!(standard, None);
+        }
+        assert!(nova7_model(ARCTIS_NOVA_7_RX).is_none());
+        assert!(nova7_model(ARCTIS_NOVA_PRO_OMNI).is_none());
+        assert!(super::super::is_detect_only(ARCTIS_NOVA_PRO_OMNI));
+        assert!(!super::super::is_detect_only(ARCTIS_NOVA_7_22A1));
+    }
+
+    #[test]
+    fn open_headset_rejects_detect_only_omni() {
+        let Ok(manager) = DeviceManager::new() else { return };
+        let mut info = create_test_device_info(None);
+        info.device_type = DeviceType::Headset;
+        info.product_id = super::super::product_ids::ARCTIS_NOVA_PRO_OMNI;
+
+        assert!(matches!(
+            manager.open_headset(&info),
+            Err(Error::DeviceCommunication(msg)) if msg.contains("not supported yet")
+        ));
+    }
+
+    #[test]
     fn open_headset_rejects_non_headset_device() {
         let Ok(manager) = DeviceManager::new() else { return };
         let info = create_test_device_info(None);
@@ -1352,13 +1437,42 @@ mod tests {
 
     #[test]
     fn keyboard_class_leaves_the_unmeasured_platform_siblings_on_lighting_only() {
-        for pid in [0x1614u16, 0x1616, 0x1618] {
+        // 0x1614 and 0x1618 moved to the direct-lighting class; 0x1616 still has no protocol of its own.
+        assert_eq!(
+            keyboard_class(0x1616),
+            KeyboardClass::Generic,
+            "0x1616 is a platform sibling nobody has read an answer from"
+        );
+    }
+
+    #[test]
+    fn keyboard_class_routes_the_experimental_direct_lighting_models() {
+        // [EXPERIMENTAL] Apex 9 pair (0x40 frame), four Gen 1 models (0x3A frame), the original Apex Pro.
+        for pid in [0x1634u16, 0x1620, 0x161C, 0x1618, 0x1614, 0x1640, 0x1610, 0x1628] {
             assert_eq!(
                 keyboard_class(pid),
-                KeyboardClass::Generic,
-                "product ID {pid:04X} is a platform sibling nobody has read an answer from"
+                KeyboardClass::ApexProTkl2023,
+                "product ID {pid:04X}"
             );
         }
+        assert_eq!(keyboard_class(0x0616), KeyboardClass::ApexM750);
+        assert_eq!(keyboard_class(0x1612), KeyboardClass::Apex7);
+    }
+
+    #[test]
+    fn apex_m750_control_is_interface_2_only() {
+        assert_eq!(APEX_M750_CONTROL_INTERFACE, 2);
+        let kb = DeviceType::Keyboard;
+        // A vendor page on another interface and a standard page on interface 2: only interface 2 qualifies,
+        // and its vendor-defined collection wins over its other collections.
+        assert_eq!(control_score(0xFFC0, 1, APEX_M750, kb), None);
+        assert_eq!(control_score(0xFF00, 0, APEX_M750, kb), None);
+        assert_eq!(control_score(0x0001, 1, APEX_M750, kb), None);
+        let vendor = control_score(0xFF00, 2, APEX_M750, kb).unwrap();
+        let standard = control_score(0x0001, 2, APEX_M750, kb).unwrap();
+        assert!(vendor > standard);
+        // Other keyboards keep the interface-1 fallback.
+        assert_eq!(control_score(0x0001, 1, APEX_PRO, kb), Some(1_000_000));
     }
 
     #[test]
@@ -1373,5 +1487,76 @@ mod tests {
             }
             Err(e) => panic!("selection should answer NotFound, not an error: {e}"),
         }
+    }
+
+    fn mouse_collection(product_id: u16, interface_number: i32, usage_page: u16, path: &str) -> DeviceInfo {
+        DeviceInfo {
+            name: std::borrow::Cow::Borrowed("Aerox 9 Wireless (2.4 GHz)"),
+            device_type: DeviceType::Mouse,
+            vendor_id: crate::STEELSERIES_VENDOR_ID,
+            product_id,
+            interface_number,
+            usage_page,
+            usage: 0x01,
+            serial_number: None,
+            manufacturer: Some("SteelSeries".to_string()),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn mouse_control_endpoint_is_the_models_interface_and_nothing_else() {
+        use super::super::product_ids::{AEROX_9_WIRELESS_DONGLE, RIVAL_5};
+
+        let vendor = control_score(0xFF00, 3, AEROX_9_WIRELESS_DONGLE, DeviceType::Mouse).unwrap();
+        let plain = control_score(0x0001, 3, AEROX_9_WIRELESS_DONGLE, DeviceType::Mouse).unwrap();
+        assert!(vendor > plain);
+        assert_eq!(
+            control_score(0xFF00, 0, AEROX_9_WIRELESS_DONGLE, DeviceType::Mouse),
+            None
+        );
+        assert_eq!(
+            control_score(0xFFC0, 1, AEROX_9_WIRELESS_DONGLE, DeviceType::Mouse),
+            None
+        );
+        assert!(control_score(0x0001, 0, RIVAL_5, DeviceType::Mouse).is_some());
+        assert_eq!(control_score(0xFF00, 3, RIVAL_5, DeviceType::Mouse), None);
+        assert_eq!(control_score(0xFF00, 3, 0xFFFF, DeviceType::Mouse), None);
+    }
+
+    #[test]
+    fn mice_are_listed_once_and_never_as_keyboards_or_headsets() {
+        use super::super::product_ids::AEROX_9_WIRELESS_DONGLE;
+
+        let mut devices = HashMap::new();
+        for (path, interface, page) in [("mi_00", 0, 0x0001), ("mi_03", 3, 0xFF00)] {
+            let info = mouse_collection(AEROX_9_WIRELESS_DONGLE, interface, page, path);
+            devices.insert(path.to_string(), info);
+        }
+        let mut control_cache = HashMap::new();
+        let control = devices["mi_03"].clone();
+        control_cache.insert((control.vendor_id, control.product_id), control);
+
+        assert!(pick_representatives(&devices, &control_cache, DeviceType::Keyboard).is_empty());
+        assert!(pick_representatives(&devices, &control_cache, DeviceType::Headset).is_empty());
+        let mice = pick_representatives(&devices, &control_cache, DeviceType::Mouse);
+        assert_eq!(mice.len(), 1);
+        assert_eq!(mice[0].path, "mi_03");
+    }
+
+    #[test]
+    fn open_mouse_rejects_non_mouse_and_unlisted_mouse_devices() {
+        let Ok(manager) = DeviceManager::new() else { return };
+        let info = create_test_device_info(None);
+        assert!(matches!(
+            manager.open_mouse(&info),
+            Err(Error::DeviceCommunication(msg)) if msg.contains("not a mouse")
+        ));
+
+        let unlisted = mouse_collection(0x182E, 0, 0x0001, "prime");
+        assert!(matches!(
+            manager.open_mouse(&unlisted),
+            Err(Error::UnsupportedDevice { product_id: 0x182E, .. })
+        ));
     }
 }

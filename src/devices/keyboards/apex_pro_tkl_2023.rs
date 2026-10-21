@@ -3,7 +3,8 @@
 use super::{GenericKeyboard, Keyboard};
 use crate::Result;
 use crate::devices::hid_reports::{
-    ActuationCommand, HidCommand, HidDeviceType, HidReportBuilder, KEYBOARD_REPORT_SIZE,
+    ActuationCommand, CommandCode, DirectFrameCommand, DirectInitCommand, HidCommand, HidDeviceType, HidReportBuilder,
+    KEYBOARD_REPORT_SIZE,
 };
 use crate::devices::key_mapping::{KeyAddress, KeyId, KeyMapping};
 use crate::devices::product_ids;
@@ -13,14 +14,14 @@ use crate::rgb::{Color, PerKeyEffect};
 use async_trait::async_trait;
 use std::ops::{Deref, DerefMut};
 
-/// Apex 2023 new protocol constants (from OpenRGB reverse engineering).
-const APEX_2023_PACKET_LENGTH: usize = 643;
-const APEX_2023_PACKET_ID_INIT: u8 = 0x4B;
-const APEX_2023_PACKET_ID_DIRECT_WIRED: u8 = 0x40;
-const APEX_2023_PACKET_ID_DIRECT_WIRELESS: u8 = 0x61;
-/// [EXPERIMENTAL] Direct-mode packet ID of the original Apex Pro (PID 0x1610): OpenRGB's
-/// `APEX_GEN1_PACKET_ID_DIRECT`, same 643-byte layout and key table, no init. Untested here (issue #283).
-const APEX_GEN1_PACKET_ID_DIRECT: u8 = 0x3A;
+/// Apex 2023 new protocol report length (from OpenRGB reverse engineering). The packet ids live in
+/// [`CommandCode`]; the original Apex Pro (PID 0x1610) uses OpenRGB's Gen 1 id `0x3A` with the same
+/// 643-byte layout and key table, no init. Untested here (issue #283).
+const APEX_2023_PACKET_LENGTH: usize = DirectInitCommand::REPORT_SIZE;
+
+/// [EXPERIMENTAL] Report length of the Apex 9 TKL / Apex 9 Mini direct frame (OpenRGB's
+/// `direct_packet_length_map`, via a community fork). Holds `(513 - 3) / 4 = 127` entries.
+const APEX_9_PACKET_LENGTH: usize = 513;
 
 /// TKL key HID codes (from OpenRGB SteelSeriesApexController.cpp).
 const TKL_KEYS: &[u8] = &[
@@ -89,13 +90,29 @@ pub fn profile_slot(usage: u8) -> Option<usize> {
     WIRED_2023_PROFILE_SLOTS.iter().position(|&u| u == usage)
 }
 
-/// Colour of `usage` in a per-key request (last entry wins), black if it is not listed.
-fn per_key_color(key_colors: &[(u8, Color)], usage: u8) -> Color {
-    key_colors
-        .iter()
-        .rev()
-        .find(|(k, _)| *k == usage)
+/// Colour of `usage` in a per-key request (last entry wins), else its colour in `previous`, else black.
+fn per_key_color(key_colors: &[(u8, Color)], previous: &[(u8, Color)], usage: u8) -> Color {
+    [key_colors, previous]
+        .into_iter()
+        .find_map(|list| list.iter().rev().find(|(k, _)| *k == usage))
         .map_or(Color::BLACK, |(_, c)| *c)
+}
+
+/// File holding the last direct frame ssgg sent, as `[usage][R][G][B]` entries. The board has no
+/// colour read-back, so this is the only way a per-key request can leave the other keys alone.
+/// shortcut: only knows what ssgg sent; GG or on-board changes since then are invisible, upgrade if a
+/// read-back command is found.
+fn last_frame_path(product_id: u16) -> Option<std::path::PathBuf> {
+    crate::config::Config::config_dir().map(|dir| dir.join(format!("direct-frame-{product_id:04x}.bin")))
+}
+
+fn parse_last_frame(bytes: &[u8]) -> Vec<(u8, Color)> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|e| (e[0], Color::new(e[1], e[2], e[3])))
+        .collect()
 }
 
 /// Apex Pro TKL 2023 implementation; also drives the other models that take direct-mode lighting
@@ -103,6 +120,8 @@ fn per_key_color(key_colors: &[(u8, Color)], usage: u8) -> Color {
 pub struct ApexProTkl2023 {
     inner: GenericKeyboard,
     initialized_new_protocol: bool,
+    /// Software brightness (0-100) applied to every direct frame; see `set_direct_brightness`.
+    brightness: u8,
 }
 
 impl ApexProTkl2023 {
@@ -114,6 +133,7 @@ impl ApexProTkl2023 {
         Self {
             inner: keyboard,
             initialized_new_protocol: false,
+            brightness: 100,
         }
     }
 
@@ -123,6 +143,7 @@ impl ApexProTkl2023 {
         Self {
             inner: GenericKeyboard::new_without_device(info),
             initialized_new_protocol: false,
+            brightness: 100,
         }
     }
 
@@ -138,8 +159,31 @@ impl ApexProTkl2023 {
     }
 
     /// The original Apex Pro speaks OpenRGB's "Gen 1" direct protocol, which needs no init report.
+    /// [EXPERIMENTAL] Apex 5, Apex 7 TKL, Apex Pro TKL (original) and Apex Pro (2024) share it; those four
+    /// come from a community fork's table, unverified, and never ran on hardware here.
     fn is_gen1(&self) -> bool {
-        self.inner.info().product_id == product_ids::APEX_PRO
+        matches!(
+            self.inner.info().product_id,
+            product_ids::APEX_PRO
+                | product_ids::APEX_PRO_TKL
+                | product_ids::APEX_7_TKL
+                | product_ids::APEX_5
+                | product_ids::APEX_PRO_2024
+        )
+    }
+
+    /// [EXPERIMENTAL] The Apex 9 TKL / Apex 9 Mini take the `0x40` frame in a 513-byte report with no
+    /// init (community fork, untested).
+    fn is_apex_9(&self) -> bool {
+        matches!(
+            self.inner.info().product_id,
+            product_ids::APEX_9_TKL | product_ids::APEX_9_MINI
+        )
+    }
+
+    /// Whether the 0x4B init report has to precede the first direct frame.
+    fn needs_init(&self) -> bool {
+        !(self.is_wired_2023() || self.is_gen1() || self.is_apex_9())
     }
 
     fn direct_keys(&self) -> &'static [u8] {
@@ -153,6 +197,8 @@ impl ApexProTkl2023 {
     fn direct_packet_length(&self) -> usize {
         if self.is_wired_2023() {
             WIRED_2023_PACKET_LENGTH
+        } else if self.is_apex_9() {
+            APEX_9_PACKET_LENGTH
         } else {
             APEX_2023_PACKET_LENGTH
         }
@@ -175,27 +221,33 @@ impl ApexProTkl2023 {
     /// Verified on Apex Pro TKL Wireless Gen 3 hardware: the dongle (`0x1644`) and
     /// the same keyboard on USB cable (`0x1646`) both answer to the wireless packet
     /// ID `0x61`, while the wired-only Gen 3 model (`0x1642`) uses `0x40`.
-    fn direct_packet_id(&self) -> Option<u8> {
+    fn direct_packet_id(&self) -> Option<CommandCode> {
         Some(match self.inner.info().product_id {
             product_ids::APEX_PRO_TKL_2023_WIRELESS
             | product_ids::APEX_PRO_TKL_2023_WIRELESS_2
             | product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE
-            | product_ids::APEX_PRO_TKL_WIRELESS_2024 => APEX_2023_PACKET_ID_DIRECT_WIRELESS,
-            product_ids::APEX_PRO_TKL_2024 | product_ids::APEX_PRO_TKL_2023 => APEX_2023_PACKET_ID_DIRECT_WIRED,
-            product_ids::APEX_PRO => APEX_GEN1_PACKET_ID_DIRECT,
+            | product_ids::APEX_PRO_TKL_WIRELESS_2024 => CommandCode::Apex2023DirectWireless,
+            product_ids::APEX_PRO_TKL_2024
+            | product_ids::APEX_PRO_TKL_2023
+            | product_ids::APEX_9_TKL
+            | product_ids::APEX_9_MINI => CommandCode::Apex2023Direct,
+            product_ids::APEX_PRO
+            | product_ids::APEX_PRO_TKL
+            | product_ids::APEX_7_TKL
+            | product_ids::APEX_5
+            | product_ids::APEX_PRO_2024 => CommandCode::ApexGen1Direct,
             _ => return None,
         })
     }
 
     /// Send the 0x4B initialization feature report required by new protocol.
     fn ensure_new_protocol_init(&mut self) -> Result<()> {
-        if self.initialized_new_protocol || self.is_wired_2023() || self.is_gen1() {
+        if self.initialized_new_protocol || !self.needs_init() {
             return Ok(());
         }
-        let mut buf = vec![0u8; APEX_2023_PACKET_LENGTH];
-        buf[0] = 0x00; // Report ID
-        buf[1] = APEX_2023_PACKET_ID_INIT;
-        self.inner.send_feature(&buf, APEX_2023_PACKET_LENGTH)?;
+        let mut buf = vec![0u8; DirectInitCommand::REPORT_SIZE];
+        let size = HidReportBuilder::new(HidDeviceType::Keyboard).build_report(DirectInitCommand, &mut buf)?;
+        self.inner.send_feature(&buf[..size], size)?;
         // The controller needs a moment before it will honour direct-mode packets.
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.initialized_new_protocol = true;
@@ -206,29 +258,74 @@ impl ApexProTkl2023 {
     /// Send one direct-mode feature report covering every key in `direct_keys()`.
     fn send_direct_frame(&mut self, color_for: impl Fn(u8) -> Color) -> Result<()> {
         self.ensure_new_protocol_init()?;
-        let buf = self.build_direct_frame(color_for);
-        self.inner.send_feature(&buf, buf.len())
+        let entries = self.direct_entries(color_for);
+        let buf = self.frame_for(&entries)?;
+        self.inner.send_feature(&buf, buf.len())?;
+        self.save_last_frame(&entries);
+        Ok(())
     }
 
-    fn build_direct_frame(&self, color_for: impl Fn(u8) -> Color) -> Vec<u8> {
-        let packet_id = self.direct_packet_id().unwrap_or(APEX_2023_PACKET_ID_DIRECT_WIRED);
-
-        let keys = self.direct_keys();
-        let packet_length = self.direct_packet_length();
-        let mut buf = vec![0u8; packet_length];
-        buf[0] = 0x00; // Report ID
-        buf[1] = packet_id;
-        buf[2] = keys.len() as u8;
-
-        for (i, &hid_code) in keys.iter().enumerate() {
-            let color = color_for(hid_code);
-            let offset = 3 + i * 4;
-            buf[offset] = hid_code;
-            buf[offset + 1] = color.r;
-            buf[offset + 2] = color.g;
-            buf[offset + 3] = color.b;
+    /// Remember the requested (unscaled) entries of a frame that reached the board, so repeated
+    /// brightness changes do not compound. Best effort: a failed save only costs the next per-key
+    /// request its merge base, so it is logged and not propagated.
+    fn save_last_frame(&self, entries: &[(u8, Color)]) {
+        let Some(path) = last_frame_path(self.inner.info().product_id) else {
+            return;
+        };
+        let bytes: Vec<u8> = entries.iter().flat_map(|(u, c)| [*u, c.r, c.g, c.b]).collect();
+        let saved = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_err(crate::Error::from)
+            .and_then(|()| crate::fs_utils::secure_write(&path, &bytes));
+        if let Err(e) = saved {
+            tracing::warn!("Could not save the last direct frame to {}: {e}", path.display());
         }
-        buf
+    }
+
+    fn load_last_frame(&self) -> Vec<(u8, Color)> {
+        last_frame_path(self.inner.info().product_id)
+            .and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| parse_last_frame(&bytes))
+            .unwrap_or_default()
+    }
+
+    /// One entry per key in `direct_keys()`, in table order.
+    fn direct_entries(&self, color_for: impl Fn(u8) -> Color) -> Vec<(u8, Color)> {
+        self.direct_keys()
+            .iter()
+            .map(|&usage| (usage, color_for(usage)))
+            .collect()
+    }
+
+    /// Frame for `entries` with the software brightness applied.
+    fn frame_for(&self, entries: &[(u8, Color)]) -> Result<Vec<u8>> {
+        let factor = f32::from(self.brightness) / 100.0;
+        let shown: Vec<(u8, Color)> = entries.iter().map(|(u, c)| (*u, c.scale(factor))).collect();
+        let command = DirectFrameCommand {
+            packet: self.direct_packet_id().unwrap_or(CommandCode::Apex2023Direct),
+            report_len: self.direct_packet_length(),
+            entries: &shown,
+        };
+        let mut buf = vec![0u8; command.report_len];
+        let size = HidReportBuilder::new(HidDeviceType::Keyboard).build_report(command, &mut buf)?;
+        buf.truncate(size);
+        Ok(buf)
+    }
+
+    /// [EXPERIMENTAL] No brightness command is known for the direct models (GG scales colours in
+    /// software), so remember the level and resend the last frame at it; later frames are scaled too.
+    /// shortcut: the level lives in this process only, so a later `ssgg` run sends full-brightness
+    /// colours until it sets brightness again; upgrade by persisting it next to the last frame once
+    /// the daemon stops pre-scaling through `RgbController`.
+    fn set_direct_brightness(&mut self, level: u8) -> Result<()> {
+        self.brightness = level.min(100);
+        let previous = self.load_last_frame();
+        if previous.is_empty() {
+            tracing::warn!("No saved frame to dim; the level applies to the next frame");
+            return Ok(());
+        }
+        self.send_direct_frame(|usage| per_key_color(&[], &previous, usage))
     }
 
     /// Send per-key direct RGB using the new 643-byte feature report protocol.
@@ -236,8 +333,8 @@ impl ApexProTkl2023 {
         self.send_direct_frame(|_| color)
     }
 
-    /// [EXPERIMENTAL] Per-key colours as one direct frame. Keys not listed are sent black: a frame
-    /// replaces every key and the board has no known read-back, so there is no prior state to keep.
+    /// [EXPERIMENTAL] Per-key colours as one direct frame. A frame replaces every key and the board has
+    /// no known read-back, so unlisted keys keep the colour of the last frame ssgg sent (black if none).
     fn send_direct_key_colors(&mut self, key_colors: &[(u8, Color)]) -> Result<()> {
         for (usage, _) in key_colors.iter().filter(|(u, _)| !self.direct_keys().contains(u)) {
             tracing::warn!("HID usage {usage:#04x} is not addressable in direct mode; skipped");
@@ -247,7 +344,11 @@ impl ApexProTkl2023 {
                 "None of the requested keys is addressable in direct mode".to_string(),
             ));
         }
-        self.send_direct_frame(|usage| per_key_color(key_colors, usage))
+        let previous = self.load_last_frame();
+        if previous.is_empty() {
+            tracing::warn!("No saved frame; keys not named are sent black");
+        }
+        self.send_direct_frame(|usage| per_key_color(key_colors, &previous, usage))
     }
 
     /// Set actuation point for all keys (global).
@@ -289,7 +390,7 @@ impl Device for ApexProTkl2023 {
     fn initialize(&mut self) -> Result<()> {
         // Wireless variant uses feature reports for init, not output reports.
         // The 0x4B init is sent lazily in ensure_new_protocol_init().
-        if self.is_wireless() || self.is_gen1() {
+        if self.is_wireless() || self.is_gen1() || self.is_apex_9() {
             return Ok(());
         }
         self.inner.initialize()
@@ -341,6 +442,9 @@ crate::impl_keyboard_with_delegation!(ApexProTkl2023, {
     }
 
     async fn set_brightness(&mut self, brightness: u8) -> Result<()> {
+        if self.uses_new_protocol() {
+            return self.set_direct_brightness(brightness);
+        }
         self.inner.set_brightness(brightness).await
     }
 
@@ -453,15 +557,15 @@ mod tests {
         // to the wireless packet ID; the wired-only model uses 0x40.
         assert_eq!(
             keyboard_for(product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE).direct_packet_id(),
-            Some(APEX_2023_PACKET_ID_DIRECT_WIRELESS)
+            Some(CommandCode::Apex2023DirectWireless)
         );
         assert_eq!(
             keyboard_for(product_ids::APEX_PRO_TKL_WIRELESS_2024).direct_packet_id(),
-            Some(APEX_2023_PACKET_ID_DIRECT_WIRELESS)
+            Some(CommandCode::Apex2023DirectWireless)
         );
         assert_eq!(
             keyboard_for(product_ids::APEX_PRO_TKL_2024).direct_packet_id(),
-            Some(APEX_2023_PACKET_ID_DIRECT_WIRED)
+            Some(CommandCode::Apex2023Direct)
         );
     }
 
@@ -470,7 +574,7 @@ mod tests {
         // [EXPERIMENTAL] layout read from a GG USBPcap capture, not yet confirmed on hardware.
         let keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2023);
         assert!(keyboard.uses_new_protocol());
-        assert_eq!(keyboard.direct_packet_id(), Some(APEX_2023_PACKET_ID_DIRECT_WIRED));
+        assert_eq!(keyboard.direct_packet_id(), Some(CommandCode::Apex2023Direct));
         assert_eq!(keyboard.direct_keys().len(), 84);
         assert_eq!(keyboard.direct_packet_length(), 645);
         assert!(3 + keyboard.direct_keys().len() * 4 <= WIRED_2023_PACKET_LENGTH);
@@ -480,10 +584,12 @@ mod tests {
     fn wired_2023_per_key_frame_lights_only_requested_keys() {
         let keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2023);
         let requested = [(0x1A, Color::RED), (0x29, Color::BLUE)]; // W, Esc
-        let frame = keyboard.build_direct_frame(|usage| per_key_color(&requested, usage));
+        let frame = keyboard
+            .frame_for(&keyboard.direct_entries(|usage| per_key_color(&requested, &[], usage)))
+            .unwrap();
 
         assert_eq!(frame.len(), WIRED_2023_PACKET_LENGTH);
-        assert_eq!(&frame[..3], &[0x00, APEX_2023_PACKET_ID_DIRECT_WIRED, 0x54]);
+        assert_eq!(&frame[..3], &[0x00, 0x40, 0x54]);
         for (i, entry) in frame[3..3 + WIRED_2023_KEYS.len() * 4]
             .as_chunks::<4>()
             .0
@@ -499,6 +605,16 @@ mod tests {
             assert_eq!(&entry[1..], &expected, "usage {:#04x}", entry[0]);
         }
         assert!(frame[3 + WIRED_2023_KEYS.len() * 4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn per_key_request_keeps_previous_colours_for_unlisted_keys() {
+        let previous = parse_last_frame(&[0x1A, 1, 2, 3, 0x04, 9, 9, 9]);
+        let requested = [(0x04, Color::RED)];
+
+        assert_eq!(per_key_color(&requested, &previous, 0x04), Color::RED);
+        assert_eq!(per_key_color(&requested, &previous, 0x1A), Color::new(1, 2, 3));
+        assert_eq!(per_key_color(&requested, &previous, 0x05), Color::BLACK);
     }
 
     #[test]
@@ -558,10 +674,30 @@ mod tests {
     #[test]
     fn original_apex_pro_uses_openrgb_gen1_frame() {
         let keyboard = keyboard_for(product_ids::APEX_PRO);
-        assert_eq!(keyboard.direct_packet_id(), Some(APEX_GEN1_PACKET_ID_DIRECT));
-        let frame = keyboard.build_direct_frame(|_| Color::RED);
+        assert_eq!(keyboard.direct_packet_id(), Some(CommandCode::ApexGen1Direct));
+        let frame = keyboard.frame_for(&keyboard.direct_entries(|_| Color::RED)).unwrap();
         assert_eq!(frame.len(), APEX_2023_PACKET_LENGTH);
         assert_eq!(&frame[..7], &[0x00, 0x3A, 112, 0x04, 0xFF, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn brightness_scales_the_frame_without_compounding() {
+        let mut keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2023);
+        let entries = keyboard.direct_entries(|_| Color::new(200, 100, 50));
+
+        keyboard.brightness = 50;
+        let first = keyboard.frame_for(&entries).unwrap();
+        let second = keyboard.frame_for(&entries).unwrap();
+
+        assert_eq!(&first[3..7], &[0x04, 100, 50, 25]);
+        assert_eq!(first, second, "scaling must not feed back into the entries");
+        assert_eq!(entries[0], (0x04, Color::new(200, 100, 50)));
+
+        keyboard.brightness = 100;
+        assert_eq!(&keyboard.frame_for(&entries).unwrap()[3..7], &[0x04, 200, 100, 50]);
+
+        keyboard.brightness = 0;
+        assert_eq!(&keyboard.frame_for(&entries).unwrap()[3..7], &[0x04, 0, 0, 0]);
     }
 
     #[test]
@@ -569,6 +705,65 @@ mod tests {
         let keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2024);
         assert_eq!(keyboard.direct_keys().len(), 112);
         assert_eq!(keyboard.direct_packet_length(), APEX_2023_PACKET_LENGTH);
+    }
+
+    #[test]
+    fn apex_9_pair_uses_the_0x40_frame_in_513_bytes_without_init() {
+        for pid in [product_ids::APEX_9_TKL, product_ids::APEX_9_MINI] {
+            let keyboard = keyboard_for(pid);
+            assert_eq!(
+                keyboard.direct_packet_id(),
+                Some(CommandCode::Apex2023Direct),
+                "{pid:#06x}"
+            );
+            assert_eq!(keyboard.direct_packet_length(), 513, "{pid:#06x}");
+            assert!(!keyboard.needs_init(), "{pid:#06x}");
+            assert_eq!(keyboard.direct_keys().len(), 112);
+
+            let frame = keyboard.frame_for(&keyboard.direct_entries(|_| Color::RED)).unwrap();
+            assert_eq!(frame.len(), 513);
+            assert_eq!(&frame[..7], &[0x00, 0x40, 0x70, 0x04, 0xFF, 0x00, 0x00]);
+            assert!(frame[3 + 112 * 4..].iter().all(|&b| b == 0));
+        }
+        assert!((513 - 3) / 4 >= TKL_KEYS.len());
+    }
+
+    #[test]
+    fn gen1_fork_models_use_the_0x3a_frame_without_init() {
+        for pid in [
+            product_ids::APEX_5,
+            product_ids::APEX_7_TKL,
+            product_ids::APEX_PRO_TKL,
+            product_ids::APEX_PRO_2024,
+        ] {
+            let keyboard = keyboard_for(pid);
+            assert_eq!(
+                keyboard.direct_packet_id(),
+                Some(CommandCode::ApexGen1Direct),
+                "{pid:#06x}"
+            );
+            assert_eq!(keyboard.direct_packet_length(), APEX_2023_PACKET_LENGTH, "{pid:#06x}");
+            assert!(!keyboard.needs_init(), "{pid:#06x}");
+            assert_eq!(keyboard.direct_keys().len(), 112);
+        }
+    }
+
+    #[test]
+    fn init_is_needed_only_where_it_was_before() {
+        assert!(!keyboard_for(product_ids::APEX_PRO_TKL_2023).needs_init());
+        assert!(!keyboard_for(product_ids::APEX_PRO).needs_init());
+        for pid in [
+            product_ids::APEX_PRO_TKL_2024,
+            product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE,
+            product_ids::APEX_PRO_TKL_WIRELESS_2024,
+        ] {
+            assert!(keyboard_for(pid).needs_init(), "{pid:#06x}");
+        }
+    }
+
+    #[test]
+    fn apex_7_keeps_its_own_class_and_no_direct_frame() {
+        assert_eq!(keyboard_for(product_ids::APEX_7).direct_packet_id(), None);
     }
 
     #[test]

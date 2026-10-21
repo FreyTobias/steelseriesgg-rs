@@ -18,13 +18,17 @@ Open-source SteelSeries GG replacement for Linux. Controls SteelSeries keyboards
 Use `rg --files src/` for the full tree. Non-obvious entry points:
 
 ```
-src/main.rs                    main() and most cmd_* handlers
+src/main.rs                    main() and the active cmd_* handlers (rgb, profile, headset, mouse, remap, ...)
+src/commands/                  moved cmd_* families: onboard.rs, performance.rs, diagnostics.rs
+src/input/                     feature `remap`: key remapper (remapper.rs pure core, linux.rs evdev/uinput)
 src/cli.rs                     clap types (Cli, Commands, *Action) and argument parse helpers
 src/daemon.rs                  daemon loop, hot-plug monitoring, GameSense startup
 src/error.rs                   crate::error::Error (thiserror) + Result alias
 src/devices/hid_reports.rs     HidReportBuilder and typed HID commands - use this, not raw bytes
 src/devices/discovery.rs       DeviceManager: enumeration, hot-plug, fingerprinting
-src/devices/keyboards/         Keyboard impls (apex.rs, apex_pro_tkl_2023.rs = experimental)
+src/devices/keyboards/         Keyboard impls (apex.rs, apex_7.rs, apex_pro_tkl_2023.rs = experimental, apex_m750.rs)
+src/devices/headsets/          generic headset + nova7.rs (Arctis Nova 7 family, experimental)
+src/devices/mice/              rivalcfg Modern family mice (modern.rs, dpi_tables.rs; experimental)
 src/gamesense/server.rs        Axum HTTP server (port 27301)
 src/audio/                     feature `audio` (pulse.rs) and `sonar` (sonar.rs)
 src/bin/                       helper binaries, not part of `ssgg` (discover_actuation probes actuation firmware)
@@ -77,8 +81,9 @@ this is expected, CI builds and lints `audio` on Linux only.
 | *(none)* | Core RGB, GameSense, profiles | — |
 | `audio` | AudioMixer, PulseAudio/PipeWire backend | `libpulse-dev` |
 | `sonar` | SonarClient HTTP integration | — (reqwest already in tree) |
+| `remap` | `ssgg remap run`: evdev key remapper (Linux only) | `evdev` (Linux target), `rustix/event` |
 
-`audio` and `sonar` are independent; do not couple them. Experimental protocol paths are not feature-gated; they carry
+`audio`, `sonar` and `remap` are independent; do not couple them. Experimental protocol paths are not feature-gated; they carry
 `[EXPERIMENTAL]` labels instead (see `.claude/rules/experimental-protocol.md`).
 
 ---
@@ -90,7 +95,7 @@ this is expected, CI builds and lints `audio` on Linux only.
 3. **GameSense CORS**: enforce localhost-only origin; the policy may only be tightened, never relaxed.
 4. **Propagate errors**: use `?` or return an explicit `Err` value — no `unwrap` or `expect` in production paths.
 5. **Error types**: `crate::error::Error` with `thiserror` at library boundaries; `anyhow` with `context()` in `src/main.rs` and binaries.
-6. **Protocol accuracy**: the direct-mode frames (`0x40`, `0x61`, `0x3A`), the profile blob and `PerKeyRgb (0x23)` are reverse-engineered; only one solid-colour `0x40` frame was replayed on hardware. Label new protocol work clearly; never state it as confirmed unless tested on hardware.
+6. **Protocol accuracy**: the direct-mode frames (`0x40`, `0x61`, `0x3A`), the profile blob and `PerKeyRgb (0x23)` are reverse-engineered; only a solid-colour and per-key `0x40` frame were replayed on hardware (wired `0x1628`). Label new protocol work clearly; never state it as confirmed unless tested on hardware.
 7. **Minimal scope**: fix what the task asks, nothing more. No opportunistic refactors.
 8. **No mutable global state**, no panics in non-test code (unless explicitly fatal and documented), no ignored `Result`s.
 9. **`unsafe` blocks** must document the safety invariant inline.
@@ -119,62 +124,41 @@ this is expected, CI builds and lints `audio` on Linux only.
 
 - `docs/development/` was checked against source on 2026-10-15 (`docs/development/README.md` lists each file and
   its state). Source still wins; verify before acting on a doc claim.
-- Command-code status (confirmed / experimental / placeholder) lives in `.claude/rules/experimental-protocol.md`.
+- Command-code status (confirmed / experimental / placeholder): `.claude/rules/experimental-protocol.md`.
+- Apex Pro TKL 2023 wired (PID `0x1628`, firmware `1.19.7`): transport, lighting frame, profile blob, slot map,
+  checksum, 64-byte commands, GG's stored config and the Frida trace are in
+  `docs/development/apex-pro-tkl-2023-gg-capture.md`. All `[EXPERIMENTAL]`. Invariants to keep in mind:
+  - **Hardware evidence is thin**: `ssgg rgb color FF0000` turned the board solid red (2026-10-14, GG stopped,
+    user-confirmed) and one per-key frame lit one key (2026-10-21). Other colours, Linux hidraw and actuation are untested.
+  - **Never write the on-board profile**: no read-back command exists, so any write replaces the board's other
+    settings with a stale or synthetic blob. The code (`apex_pro_tkl_2023_profile.rs`) builds blobs; nothing sends them.
+  - **No actuation or lighting read-back exists on this firmware** (Frida trace, 2026-10-21: GG never issues
+    `GET_FEATURE`). Do not add read-back commands for `0x1628`.
+  - **GG overwrites ssgg** at about 19 fps while `SteelSeriesEngine.exe` runs. Stop GG before any hardware test.
 
-### Apex Pro TKL 2023, wired (PID `0x1628`): SteelSeries GG wire protocol
+### Verification tooling (Windows)
 
-Captured from official GG on Windows with USBPcap on 2026-10-14 (firmware `1.19.7`). Full write-up, slot map and
-offsets: `docs/development/apex-pro-tkl-2023-gg-capture.md`. All of it is `[EXPERIMENTAL]`; only the lighting frame
-was replayed from `ssgg` (one solid colour, see below).
+Use these to check protocol claims against what official GG really does, before promoting any status. Never modify
+the target process or GG's files. Record device, firmware and date for every result.
 
-- **Where GG keeps the protocol**: the Electron UI (`app.asar`) only talks to the local core. HID code lives in
-  `C:\Program Files\SteelSeries\GG\apps\engine`: `SteelSeriesEngine.exe` (Go) -> `SSEdevice.dll` -> `HIDDLL.dll`.
-  `deviceSpecifications\*.edevice` are encrypted and were not decrypted.
-- **Transport**: HID class SET_REPORT to USB interface 1 (`wIndex 1`). Feature report ID 0, 644 wire bytes
-  (`wValue 0x0300`) for lighting and profile upload. Output report ID 0, 64 bytes (`wValue 0x0200`) for commands.
-  Replies on interrupt EP `0x82`.
-- **Lighting**: `0x40`, count `0x54` (84), then `[usage][R][G][B]` x84 (USB HID usages), zero padded. GG streams
-  about 19 fps and overwrites other programs while its engine runs; with GG closed the keyboard keeps the last frame.
-  GG brightness is software scaling of the RGB values (brightness 0 = all-black frame).
-- **Code state**: `0x1628` uses the direct path with GG's 84-key table `WIRED_2023_KEYS`, a 645-byte buffer
-  (report-ID byte + 644 wire bytes) and skips the `0x4B` init (`apex_pro_tkl_2023.rs`). Gen3 models keep `TKL_KEYS`
-  (112) and 643. Unix `send_feature` is hidapi `send_feature_report` on the handle discovery opened (`keyboards/mod.rs`); untested on `0x1628` under Linux.
-  Per-key (`rgb perkey`) sends the same 84-key frame with unlisted keys black (no read-back exists).
-  `ssgg rgb` warns on Windows when `SteelSeriesEngine.exe` runs (`warn_if_gg_engine_running`, `src/main.rs`).
-- **Hardware evidence**: on 2026-10-14, with GG stopped, `ssgg rgb color FF0000` turned the keyboard solid red
-  (user-confirmed); USBPcap showed `wValue 0x0300, wIndex 1, wLength 644, 40 54 04 ff 00 00 05 ...`. Nothing else
-  (other colours, per-key, Linux hidraw, actuation) has been tested.
-- **On-board profile**: GG rewrites 12,500 bytes in 25 chunks after every change, chunk header
-  `03 01 80 | len u16 LE (500) | offset u16 LE | 00 00`. Per-key tables of 70 slots: actuation at 1084, reset at
-  1154, release mode at 1446 (0 off / 2 Rapid Trigger / 3 Key Guard), RT sensitivity at 1516; Rapid Tap enable at
-  2700. Slot map is `WIRED_2023_PROFILE_SLOTS` / `profile_slot()`. Actuation raw values: 0.1 mm = `05`,
-  1.0 = `15`, 2.0 = `39`, 3.0 = `86` (non-linear).
-- **Profile checksum (solved 2026-10-15)**: little-endian u32 at blob offset 12320 = STM32 hardware CRC-32
-  (poly `0x04C11DB7`, init `0xFFFFFFFF`, no reflection, no xorout) over bytes `0..12320` read as LE 32-bit words.
-  Matches all 26 captured blobs (8 distinct). Code: `keyboards/apex_pro_tkl_2023_profile.rs` (checksum, actuation
-  patch, chunk split; nothing sends it). **Still never write the profile**: no read-back command is known, so any
-  write would replace the board's other settings with a stale or synthetic blob.
-- **64-byte commands seen**: poll set `02 01 80`, `b1`, `b2`, `34`, `90` (`90` returns firmware version);
-  `38 66 01/00` with Rapid Tap on/off; `38 67 0a 00 04 07 <n> ...` in an uncontrolled run. Meanings unknown except `90`.
-- **GG's stored config**: per-key JSON in `C:\ProgramData\SteelSeries\GG\apps\engine\db\database.db`, table
-  `configurations`, column `settings`, `device_id` 242 (`apex_pro_tkl_2022`). Open read-only with GG stopped.
+| Question | Tool | How |
+|----------|------|-----|
+| What bytes does GG put on the wire? | USBPcap + tshark | `C:\Program Files\USBPcap\USBPcapCMD.exe -d \\.\USBPcap1 -o <file> -A` (no args = interactive, hangs). Read with `C:\Program Files\Wireshark\tshark.exe -e frame.time_epoch -e usb.data_fragment`; filter `usb.setup.bRequest==9 && usb.bmRequestType==0x21 && usb.setup.wValue==0x0300` (`0x0200` = output reports). Re-check the device address after changing ports. |
+| Which HID calls does the engine make, and does a UI action trigger a command? | Frida (`frida`, `frida-trace` in `~/.venv`; or `rea` MCP `start_frida_session` / `instrument_with_frida`) | Attach read-only to `SteelSeriesEngine.exe`; hook kernel32 `ReadFile` / `WriteFile` / `DeviceIoControl` for small buffers only (large-buffer hooks coincided with engine restarts). Heap reads (`ReadProcessMemory`) recover the decoded live settings JSON; `*.edevice` files are encrypted and need no decryption. |
+| What does a GG binary do (`HIDDLL.dll`, `SSEdevice.dll`)? | Ghidra, else `rea` MCP (Rizin/Cutter tools) | Ghidra is not on PATH on this machine; use `analyzeHeadless` if installed. Prefer Frida first, static analysis only when runtime tracing cannot answer. |
+| What config does GG store? | SQLite, read-only | `C:\ProgramData\SteelSeries\GG\apps\engine\db\database.db`, table `configurations`, column `settings`, `device_id` 242. Open with GG stopped. |
 
-### Windows reverse-engineering environment
+A capture or trace proves what GG sends; it does not make an `ssgg` frame Confirmed. Confirmed needs the frame
+replayed from `ssgg` on hardware (see `.claude/rules/experimental-protocol.md`).
 
-- Tools: Wireshark (`C:\Program Files\Wireshark\tshark.exe`), USBPcap (`C:\Program Files\USBPcap\USBPcapCMD.exe`).
-  `USBPcapCMD` without arguments is interactive and hangs; always pass `-d \\.\USBPcap1 -o <file> -A`.
-- The keyboard was USB device address 3 in past captures; re-check with tshark after changing ports.
-- Useful tshark fields: `-e frame.time_epoch -e usb.data_fragment`; filter
-  `usb.setup.bRequest==9 && usb.bmRequestType==0x21 && usb.setup.wValue==0x0300` (or `0x0200` for output reports).
+Gotchas:
 - Stop GG: kill every `SteelSeries*` process, or the engine respawns. Restart from `C:\Program Files\SteelSeries\GG`
   with `SteelSeriesGGEZ.exe -dataPath="C:\ProgramData\SteelSeries\GG" -dbEnv=production`
   (`SteelSeriesGG.exe` alone exits with code 2).
-- Do not launch GUI capture prompters with `-WindowStyle Hidden`; it hides the form.
+- Never launch GUI capture prompters with `-WindowStyle Hidden`; it hides the form.
 - `ctx_execute_file` refuses paths outside the project; run analysis scripts with `python -I <script> <args>`.
-- Capture artifacts (outside the repo) in `C:\Users\Ven0m0\gg-capture-artifacts\`: `blobs.bin` / `blobs3.bin`
-  (reassembled 12,500-byte profile blobs, 13 each, 8 distinct) and `profile_crc_check.py <blob files>`. The original
-  pcaps (`run2.pcap`, `run3.pcap`), step CSVs, `an*.py` scripts and capture prompters were gone on 2026-10-15; the
-  blobs were recovered from an old session scratchpad.
+- Capture artifacts live outside the repo in `C:\Users\Ven0m0\gg-capture-artifacts\`: `blobs.bin` / `blobs3.bin`
+  (12,500-byte profile blobs, 8 distinct) and `profile_crc_check.py <blob files>`. The original pcaps are gone.
 
 ---
 

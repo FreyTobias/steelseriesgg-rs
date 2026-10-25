@@ -1,7 +1,7 @@
 # steelseriesgg-rs – SteelSeries GG for Linux
 
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.97.1%20stable-orange?style=flat-square)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FVen0m0%2Fsteelseriesgg-rs%2Fmain%2FCargo.toml&query=%24.package%5B%27rust-version%27%5D&label=rust&color=orange&style=flat-square)](https://www.rust-lang.org/)
 ![GitHub repo size](https://img.shields.io/github/repo-size/Ven0m0/steelseriesgg-rs)
 
 Open-source [SteelSeries GG](https://steelseries.com/gg/engine) replacement for Linux. Control SteelSeries keyboards and headsets: RGB lighting, GameSense-compatible server, profiles, and (optional) audio/Sonar integration.
@@ -59,7 +59,7 @@ systemctl --user enable --now ssgg.service
 ### Prerequisites
 
 - Linux with udev
-- Rust 1.97.1 (MSRV, pinned in `rust-toolchain.toml` and enforced via `rust-version` in `Cargo.toml`)
+- Rust stable at or above the MSRV in the badge above (`rust-version` in `Cargo.toml`; `rust-toolchain.toml` tracks stable)
 
 No extra HID development packages are required for the default source build.
 

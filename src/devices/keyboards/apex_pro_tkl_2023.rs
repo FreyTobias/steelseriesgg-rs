@@ -239,34 +239,70 @@ fn hall_frame(setting: &AnalogSetting) -> Result<Option<HallFrame>> {
     }
 }
 
-/// File holding the last threshold frame ssgg sent for one layer, as `[hid][h][l]` entries: the base a
-/// per-key change is merged onto, since a frame must carry all 68 keys.
-/// shortcut: only knows what ssgg sent; GG or on-board changes since then are invisible, upgrade to the
-/// `read_gen3_profile` tables once that read is confirmed on hardware.
-fn actuation_frame_path(layer: HallLayer) -> Option<std::path::PathBuf> {
-    crate::config::Config::config_dir().map(|dir| {
-        dir.join(format!(
+/// The last-sent frames: what ssgg last sent these boards, kept in a directory because they have no
+/// read-back, so it is the only base a per-key change can be merged onto (a frame carries every key).
+/// shortcut: only knows what ssgg sent; GG or on-board changes since then are invisible, upgrade if a
+/// read-back is confirmed on hardware (`read_gen3_profile` for the thresholds).
+struct SentFrames(std::path::PathBuf);
+
+impl SentFrames {
+    /// The store in ssgg's config directory; `None` when the platform has none.
+    fn in_config() -> Option<Self> {
+        crate::config::Config::config_dir().map(Self)
+    }
+
+    /// The requested (unscaled by brightness) `(usage, colour)` entries of the last direct frame sent to
+    /// `product_id`; empty when none was saved.
+    fn colours(&self, product_id: u16) -> Vec<(u8, Color)> {
+        self.load(&Self::colours_name(product_id))
+            .map(|bytes| parse_last_frame(&bytes))
+            .unwrap_or_default()
+    }
+
+    fn save_colours(&self, product_id: u16, entries: &[(u8, Color)]) {
+        let bytes: Vec<u8> = entries.iter().flat_map(|(u, c)| [*u, c.r, c.g, c.b]).collect();
+        self.save(&Self::colours_name(product_id), &bytes);
+    }
+
+    /// The last `(hid, h, l)` threshold frame sent for `layer` of the wired board; `None` unless it holds
+    /// exactly the 68 analog keys.
+    fn thresholds(&self, layer: HallLayer) -> Option<Vec<(u8, u8, u8)>> {
+        let bytes = self.load(&Self::thresholds_name(layer))?;
+        let frame: Vec<_> = bytes.as_chunks::<3>().0.iter().map(|e| (e[0], e[1], e[2])).collect();
+        (frame.len() == analog_keys().len()).then_some(frame)
+    }
+
+    fn save_thresholds(&self, layer: HallLayer, frame: &[(u8, u8, u8)]) {
+        let bytes: Vec<u8> = frame.iter().flat_map(|&(hid, h, l)| [hid, h, l]).collect();
+        self.save(&Self::thresholds_name(layer), &bytes);
+    }
+
+    fn colours_name(product_id: u16) -> String {
+        format!("direct-frame-{product_id:04x}.bin")
+    }
+
+    fn thresholds_name(layer: HallLayer) -> String {
+        format!(
             "actuation-{:04x}-layer{:02x}.bin",
             product_ids::APEX_PRO_TKL_2023,
             layer as u8
-        ))
-    })
-}
+        )
+    }
 
-/// Remember a threshold frame that reached the board. Best effort, like `save_last_frame`: a failed save
-/// only costs the next per-key change its merge base, so it is logged and not propagated.
-fn save_actuation_frame(layer: HallLayer, frame: &[(u8, u8, u8)]) {
-    let Some(path) = actuation_frame_path(layer) else {
-        return;
-    };
-    let bytes: Vec<u8> = frame.iter().flat_map(|&(hid, h, l)| [hid, h, l]).collect();
-    let saved = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .map_err(crate::Error::from)
-        .and_then(|()| crate::fs_utils::secure_write(&path, &bytes));
-    if let Err(e) = saved {
-        tracing::warn!("Could not save the actuation frame to {}: {e}", path.display());
+    fn load(&self, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.0.join(name)).ok()
+    }
+
+    /// Best effort: a failed save only costs the next per-key change its merge base, so it is logged and
+    /// not propagated.
+    fn save(&self, name: &str, bytes: &[u8]) {
+        let path = self.0.join(name);
+        let saved = std::fs::create_dir_all(&self.0)
+            .map_err(crate::Error::from)
+            .and_then(|()| crate::fs_utils::secure_write(&path, bytes));
+        if let Err(e) = saved {
+            tracing::warn!("Could not save the last-sent frame to {}: {e}", path.display());
+        }
     }
 }
 
@@ -293,24 +329,22 @@ fn merge_actuation(base: &[(u8, u8, u8)], layer: HallLayer, changes: &[(u8, u8)]
 ///
 /// Returns an error when no frame was saved, a key has no analog switch, or a distance is outside 0.1-4.0 mm.
 pub fn key_actuation_setting(layer: HallLayer, changes: &[(u8, u8)]) -> Result<AnalogSetting> {
-    let base = actuation_frame_path(layer)
-        .and_then(|path| std::fs::read(path).ok())
-        .map(|bytes| {
-            bytes
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|e| (e[0], e[1], e[2]))
-                .collect::<Vec<_>>()
-        })
-        .filter(|frame| frame.len() == analog_keys().len())
-        .ok_or_else(|| {
-            crate::Error::InvalidConfig(format!(
-                "no saved {layer:?}-layer actuation frame: set every key once with `ssgg actuation set <mm>{}` \
+    key_actuation_setting_in(SentFrames::in_config().as_ref(), layer, changes)
+}
+
+/// [`key_actuation_setting`] against a given store, so tests need not touch the user's config directory.
+fn key_actuation_setting_in(
+    sent: Option<&SentFrames>,
+    layer: HallLayer,
+    changes: &[(u8, u8)],
+) -> Result<AnalogSetting> {
+    let base = sent.and_then(|sent| sent.thresholds(layer)).ok_or_else(|| {
+        crate::Error::InvalidConfig(format!(
+            "no saved {layer:?}-layer actuation frame: set every key once with `ssgg actuation set <mm>{}` \
                  so ssgg knows the other keys' values",
-                if layer == HallLayer::Second { " --second" } else { "" }
-            ))
-        })?;
+            if layer == HallLayer::Second { " --second" } else { "" }
+        ))
+    })?;
     merge_actuation(&base, layer, changes)
 }
 
@@ -407,14 +441,7 @@ fn per_key_color(key_colors: &[(u8, Color)], previous: &[(u8, Color)], usage: u8
         .map_or(Color::BLACK, |(_, c)| *c)
 }
 
-/// File holding the last direct frame ssgg sent, as `[usage][R][G][B]` entries. The board has no
-/// colour read-back, so this is the only way a per-key request can leave the other keys alone.
-/// shortcut: only knows what ssgg sent; GG or on-board changes since then are invisible, upgrade if a
-/// read-back command is found.
-fn last_frame_path(product_id: u16) -> Option<std::path::PathBuf> {
-    crate::config::Config::config_dir().map(|dir| dir.join(format!("direct-frame-{product_id:04x}.bin")))
-}
-
+/// `[usage][R][G][B]` entries, as `SentFrames` keeps a direct frame.
 fn parse_last_frame(bytes: &[u8]) -> Vec<(u8, Color)> {
     bytes
         .as_chunks::<4>()
@@ -434,6 +461,7 @@ pub struct ApexProTkl2023 {
     gen3_firmware: Option<bool>,
     /// Software brightness (0-100) applied to every direct frame; see `set_direct_brightness`.
     brightness: u8,
+    sent: Option<SentFrames>,
 }
 
 impl ApexProTkl2023 {
@@ -447,6 +475,7 @@ impl ApexProTkl2023 {
             initialized_new_protocol: false,
             gen3_firmware: None,
             brightness: 100,
+            sent: SentFrames::in_config(),
         }
     }
 
@@ -458,6 +487,7 @@ impl ApexProTkl2023 {
             initialized_new_protocol: false,
             gen3_firmware: None,
             brightness: 100,
+            sent: SentFrames::in_config(),
         }
     }
 
@@ -549,27 +579,17 @@ impl ApexProTkl2023 {
     }
 
     /// Remember the requested (unscaled) entries of a frame that reached the board, so repeated
-    /// brightness changes do not compound. Best effort: a failed save only costs the next per-key
-    /// request its merge base, so it is logged and not propagated.
+    /// brightness changes do not compound.
     fn save_last_frame(&self, entries: &[(u8, Color)]) {
-        let Some(path) = last_frame_path(self.inner.info().product_id) else {
-            return;
-        };
-        let bytes: Vec<u8> = entries.iter().flat_map(|(u, c)| [*u, c.r, c.g, c.b]).collect();
-        let saved = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .map_err(crate::Error::from)
-            .and_then(|()| crate::fs_utils::secure_write(&path, &bytes));
-        if let Err(e) = saved {
-            tracing::warn!("Could not save the last direct frame to {}: {e}", path.display());
+        if let Some(sent) = &self.sent {
+            sent.save_colours(self.inner.info().product_id, entries);
         }
     }
 
     fn load_last_frame(&self) -> Vec<(u8, Color)> {
-        last_frame_path(self.inner.info().product_id)
-            .and_then(|path| std::fs::read(path).ok())
-            .map(|bytes| parse_last_frame(&bytes))
+        self.sent
+            .as_ref()
+            .map(|sent| sent.colours(self.inner.info().product_id))
             .unwrap_or_default()
     }
 
@@ -689,8 +709,8 @@ impl ApexProTkl2023 {
         self.require_wired_2023("a live analog-key setting")?;
         let (report, feature) = analog_report(setting)?;
         self.send_report(&report, feature)?;
-        if let Some((layer, frame)) = hall_frame(setting)? {
-            save_actuation_frame(layer, &frame);
+        if let (Some((layer, frame)), Some(sent)) = (hall_frame(setting)?, &self.sent) {
+            sent.save_thresholds(layer, &frame);
         }
         Ok(self.analog_reply())
     }
@@ -1023,6 +1043,51 @@ mod tests {
         assert_eq!(per_key_color(&requested, &previous, 0x04), Color::RED);
         assert_eq!(per_key_color(&requested, &previous, 0x1A), Color::new(1, 2, 3));
         assert_eq!(per_key_color(&requested, &previous, 0x05), Color::BLACK);
+    }
+
+    #[test]
+    fn last_sent_colours_round_trip_per_product_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2023);
+        keyboard.sent = Some(SentFrames(dir.path().join("ssgg")));
+        assert!(keyboard.load_last_frame().is_empty());
+
+        let entries = [(0x1A, Color::RED), (0x04, Color::new(1, 2, 3))];
+        keyboard.save_last_frame(&entries);
+        assert_eq!(keyboard.load_last_frame(), entries);
+
+        let mut other = keyboard_for(product_ids::APEX_PRO_TKL_2024);
+        other.sent = Some(SentFrames(dir.path().join("ssgg")));
+        assert!(other.load_last_frame().is_empty());
+    }
+
+    #[test]
+    fn key_actuation_merges_onto_the_last_sent_layer_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent = SentFrames(dir.path().join("ssgg"));
+        assert!(key_actuation_setting_in(Some(&sent), HallLayer::Primary, &[(0x1A, 10)]).is_err());
+
+        let all = AnalogSetting::Actuation {
+            layer: HallLayer::Primary,
+            tenths_mm: Some(40),
+        };
+        let (layer, frame) = hall_frame(&all).unwrap().unwrap();
+        sent.save_thresholds(layer, &frame);
+
+        let AnalogSetting::Thresholds { keys, .. } =
+            key_actuation_setting_in(Some(&sent), HallLayer::Primary, &[(0x1A, 10)]).unwrap()
+        else {
+            panic!("a per-key change is a threshold frame");
+        };
+        let (h1, l1) = actuation_raw(10).unwrap();
+        let (h40, l40) = actuation_raw(40).unwrap();
+        assert_eq!(keys.len(), 68);
+        assert!(keys.iter().all(|&(hid, h, l)| if hid == 0x1A {
+            (h, l) == (h1, l1)
+        } else {
+            (h, l) == (h40, l40)
+        }));
+        assert!(key_actuation_setting_in(Some(&sent), HallLayer::Second, &[(0x1A, 10)]).is_err());
     }
 
     #[test]

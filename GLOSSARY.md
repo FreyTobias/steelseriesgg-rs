@@ -14,3 +14,8 @@ direct-lighting models, `Apex7` for the on-board profile protocol, `Apex3`, `Ape
 report length, key table, and whether the `0x4B` init report precedes it. All `[EXPERIMENTAL]`; see
 `.claude/rules/experimental-protocol.md`. A model either has one fixed frame or two picked by a firmware
 probe (`DirectLighting::ByFirmware`, 1.19.7 and later = Gen 3).
+
+**Last-sent frame**: the last direct frame (colours, per product ID) or threshold frame (actuation, per
+layer, wired `0x1628`) ssgg sent, kept by `SentFrames` in the config directory. These boards have no
+read-back, so it is the only base a per-key change can be merged onto. It does not see changes made by GG
+or on the board since.

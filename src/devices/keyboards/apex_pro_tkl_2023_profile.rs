@@ -2,8 +2,8 @@
 //!
 //! Layout and checksum come from GG USBPcap captures (2026-10-14, firmware 1.19.7); see
 //! docs/development/apex-pro-tkl-2023-gg-capture.md. Nothing here has been written to a keyboard.
-//! There is no known read-back command, so a caller cannot obtain the current blob yet; sending a
-//! blob built from anything else would overwrite every other on-board setting.
+//! GG's device spec defines a read-back (`ssgg onboard gen3-read`, untested on hardware); until a read is
+//! confirmed, sending a blob built from anything else would overwrite every other on-board setting.
 
 use super::apex_pro_tkl_2023::{
     PROFILE_ACTUATION_OFFSET, PROFILE_RESET_OFFSET, WIRED_2023_PROFILE_SLOTS, profile_slot,
@@ -45,25 +45,39 @@ pub fn profile_checksum(data: &[u8]) -> u32 {
     })
 }
 
+/// Whether the checksum stored at [`PROFILE_CHECKSUM_OFFSET`] matches the blob; `false` for a short blob.
+pub fn checksum_matches(blob: &[u8]) -> bool {
+    blob.get(PROFILE_CHECKSUM_OFFSET..PROFILE_CHECKSUM_OFFSET + 4)
+        .and_then(|stored| <[u8; 4]>::try_from(stored).ok())
+        .is_some_and(|stored| u32::from_le_bytes(stored) == profile_checksum(&blob[..PROFILE_CHECKSUM_OFFSET]))
+}
+
 /// Recompute and store the checksum.
 pub fn seal_profile(blob: &mut [u8; PROFILE_LEN]) {
     let crc = profile_checksum(&blob[..PROFILE_CHECKSUM_OFFSET]);
     blob[PROFILE_CHECKSUM_OFFSET..PROFILE_CHECKSUM_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
 }
 
-/// Set the actuation and reset point of one analog key (by HID usage), or of every analog key when
-/// `usage` is `None`, then reseal the blob. Only the four captured distances are accepted.
-pub fn set_actuation(blob: &mut [u8; PROFILE_LEN], usage: Option<u8>, tenths_mm: u8) -> Result<()> {
-    let &(_, actuation, reset) = ACTUATION_POINTS
+/// Raw `(h, l)` hall pair (actuation, reset) of a distance in tenths of a mm. Only the four captured
+/// distances are known.
+pub fn actuation_raw(tenths_mm: u8) -> Result<(u8, u8)> {
+    ACTUATION_POINTS
         .iter()
         .find(|(t, _, _)| *t == tenths_mm)
+        .map(|&(_, actuation, reset)| (actuation, reset))
         .ok_or_else(|| {
             Error::Profile(format!(
                 "Actuation {}.{} mm has no known raw value; captured points are 0.1, 1.0, 2.0 and 3.0 mm",
                 tenths_mm / 10,
                 tenths_mm % 10
             ))
-        })?;
+        })
+}
+
+/// Set the actuation and reset point of one analog key (by HID usage), or of every analog key when
+/// `usage` is `None`, then reseal the blob. Only the four captured distances are accepted.
+pub fn set_actuation(blob: &mut [u8; PROFILE_LEN], usage: Option<u8>, tenths_mm: u8) -> Result<()> {
+    let (actuation, reset) = actuation_raw(tenths_mm)?;
 
     let slots: Vec<usize> = match usage {
         Some(usage) => vec![
@@ -114,6 +128,16 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(stored, profile_checksum(&blob[..PROFILE_CHECKSUM_OFFSET]));
+    }
+
+    #[test]
+    fn checksum_matches_only_a_sealed_blob() {
+        let mut blob = Box::new([0u8; PROFILE_LEN]);
+        blob[7] = 0x42;
+        assert!(!checksum_matches(&blob[..]));
+        seal_profile(&mut blob);
+        assert!(checksum_matches(&blob[..]));
+        assert!(!checksum_matches(&blob[..PROFILE_CHECKSUM_OFFSET + 3]));
     }
 
     #[test]

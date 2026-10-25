@@ -1,10 +1,12 @@
 //! Apex Pro TKL 2023 specific implementations.
 
+use super::apex_pro_tkl_2023_profile::{PROFILE_LEN, actuation_raw, checksum_matches};
 use super::{GenericKeyboard, Keyboard};
 use crate::Result;
 use crate::devices::hid_reports::{
-    ActuationCommand, CommandCode, DirectFrameCommand, DirectInitCommand, HidCommand, HidDeviceType, HidReportBuilder,
-    KEYBOARD_REPORT_SIZE,
+    ActuationCommand, AnalogKeyCommand, Apex2022DisplayCommand, CommandCode, DirectFrameCommand, DirectInitCommand,
+    Gen3ProfileReadCommand, HallLayer, HidCommand, HidDeviceType, HidReportBuilder, KEYBOARD_REPORT_SIZE,
+    OnboardFirmwareVersionCommand, PROFILE_CHUNK_REPORT_SIZE, RapidTapPair,
 };
 use crate::devices::key_mapping::{KeyAddress, KeyId, KeyMapping};
 use crate::devices::product_ids;
@@ -58,9 +60,11 @@ const WIRED_2023_PACKET_LENGTH: usize = 645;
 /// - Matched as a set against GG's stored config: ISO/JIS keys (13, 40, 43, 54, 59, 61, 62; identity within
 ///   the set follows the JIS/ISO layout) and Tab/Caps (14, 28).
 /// - Remaining slots follow the row order; slot 0 (grave) is the only key left for it.
+/// - GG's decrypted device spec (`apex_pro_tkl_2022` `device-key-idx-to-hid`, first 70 entries minus its two
+///   blanks) lists the same 68 usages in the same order, an independent check of every slot (2026-10-25).
 ///
 /// The checksum at offset 12320 is solved (`apex_pro_tkl_2023_profile`), but writing the blob stays blocked:
-/// no read-back command is known.
+/// the spec's read-back (`read_gen3_profile`) is untested on hardware.
 pub const WIRED_2023_PROFILE_SLOTS: [u8; 68] = [
     // ` 1 2 3 4 5 6 7 8 9 0 - = Yen
     0x35, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2D, 0x2E, 0x89,
@@ -88,6 +92,268 @@ pub const PROFILE_RT_SENSITIVITY_OFFSET: usize = 1516;
 /// without one (Esc, F-row, navigation cluster).
 pub fn profile_slot(usage: u8) -> Option<usize> {
     WIRED_2023_PROFILE_SLOTS.iter().position(|&u| u == usage)
+}
+
+/// [EXPERIMENTAL] One live analog-key setting for every analog key of the wired board (`0x1628`), sent as
+/// an [`AnalogKeyCommand`]. Spec-derived (GG `apex_pro_tkl_2022`, 2026-10-24), untested on hardware; whether
+/// a setting survives a power cycle is unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnalogSetting {
+    /// Actuation of one layer at a captured distance (tenths of a mm), or `None` for all-zero thresholds
+    /// (the second layer read all zero on the owner's board, which GG showed as no second actuation).
+    Actuation { layer: HallLayer, tenths_mm: Option<u8> },
+    /// Per-key thresholds of one layer as `(hid, h, l)`, exactly the 68 analog keys; see [`key_actuation_setting`].
+    Thresholds { layer: HallLayer, keys: Vec<(u8, u8, u8)> },
+    /// Release mode (0, 2, 3 or 4) of every analog key.
+    ReleaseMode(u8),
+    /// Rapid-trigger sensitivity of every analog key, in the spec's raw unit.
+    RapidTriggerSensitivity(u8),
+    /// Rapid tap on or off.
+    RapidTap(bool),
+    /// The full rapid-tap pair list; it replaces whatever pairs the board held.
+    RapidTapPairs(Vec<RapidTapPair>),
+}
+
+/// The analog keys in GG's frame order: `device-analog-hid-codes`, the profile slots sorted by HID usage.
+fn analog_keys() -> [u8; 68] {
+    let mut keys = WIRED_2023_PROFILE_SLOTS;
+    keys.sort_unstable();
+    keys
+}
+
+/// [EXPERIMENTAL] The report an [`AnalogSetting`] puts on the wire for the wired board, report-ID byte first,
+/// and whether it is a feature report.
+///
+/// # Errors
+///
+/// Returns an error for an uncaptured distance, a bad mode, or a rapid-tap key without an analog switch.
+pub fn analog_report(setting: &AnalogSetting) -> Result<(Vec<u8>, bool)> {
+    let keys = analog_keys();
+    let frame: Option<HallFrame>;
+    let pairs: Vec<(u8, u8)>;
+    let command = match setting {
+        AnalogSetting::Actuation { .. } | AnalogSetting::Thresholds { .. } => {
+            frame = hall_frame(setting)?;
+            let (layer, triples) = frame.as_ref().ok_or_else(|| {
+                crate::Error::InvalidConfig("an actuation setting without a threshold frame".to_string())
+            })?;
+            AnalogKeyCommand::HallThresholds {
+                layer: *layer,
+                keys: triples,
+            }
+        }
+        AnalogSetting::ReleaseMode(value) | AnalogSetting::RapidTriggerSensitivity(value) => {
+            pairs = keys.iter().map(|&hid| (hid, *value)).collect();
+            if matches!(setting, AnalogSetting::ReleaseMode(_)) {
+                AnalogKeyCommand::ReleaseMode(&pairs)
+            } else {
+                AnalogKeyCommand::RapidTriggerSensitivity(&pairs)
+            }
+        }
+        AnalogSetting::RapidTap(on) => AnalogKeyCommand::RapidTapEnable(*on),
+        AnalogSetting::RapidTapPairs(list) => {
+            if let Some(hid) = list
+                .iter()
+                .flat_map(|p| [p.hid_1, p.hid_2])
+                .find(|hid| profile_slot(*hid).is_none())
+            {
+                return Err(crate::Error::InvalidConfig(format!(
+                    "HID usage {hid:#04x} has no analog switch on this board"
+                )));
+            }
+            AnalogKeyCommand::RapidTapPairs(list)
+        }
+    };
+    let mut buf = vec![0u8; command.report_len()];
+    let size = HidReportBuilder::new(HidDeviceType::Keyboard).build_report(command, &mut buf)?;
+    buf.truncate(size);
+    Ok((buf, command.is_feature()))
+}
+
+/// One layer's `(hid, h, l)` threshold entries.
+type HallFrame = (HallLayer, Vec<(u8, u8, u8)>);
+
+/// The full `(hid, h, l)` frame an actuation setting sends, in GG's key order; `None` for other settings.
+fn hall_frame(setting: &AnalogSetting) -> Result<Option<HallFrame>> {
+    match setting {
+        AnalogSetting::Actuation { layer, tenths_mm } => {
+            let (h, l) = tenths_mm.map_or(Ok((0, 0)), actuation_raw)?;
+            Ok(Some((*layer, analog_keys().iter().map(|&hid| (hid, h, l)).collect())))
+        }
+        AnalogSetting::Thresholds { layer, keys } => {
+            let mut hids: Vec<u8> = keys.iter().map(|k| k.0).collect();
+            hids.sort_unstable();
+            if hids != analog_keys() {
+                return Err(crate::Error::InvalidConfig(
+                    "a threshold frame must list each of the 68 analog keys exactly once".to_string(),
+                ));
+            }
+            let mut sorted = keys.clone();
+            sorted.sort_unstable_by_key(|k| k.0);
+            Ok(Some((*layer, sorted)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// File holding the last threshold frame ssgg sent for one layer, as `[hid][h][l]` entries: the base a
+/// per-key change is merged onto, since a frame must carry all 68 keys.
+/// shortcut: only knows what ssgg sent; GG or on-board changes since then are invisible, upgrade to the
+/// `read_gen3_profile` tables once that read is confirmed on hardware.
+fn actuation_frame_path(layer: HallLayer) -> Option<std::path::PathBuf> {
+    crate::config::Config::config_dir().map(|dir| {
+        dir.join(format!(
+            "actuation-{:04x}-layer{:02x}.bin",
+            product_ids::APEX_PRO_TKL_2023,
+            layer as u8
+        ))
+    })
+}
+
+/// Remember a threshold frame that reached the board. Best effort, like `save_last_frame`: a failed save
+/// only costs the next per-key change its merge base, so it is logged and not propagated.
+fn save_actuation_frame(layer: HallLayer, frame: &[(u8, u8, u8)]) {
+    let Some(path) = actuation_frame_path(layer) else {
+        return;
+    };
+    let bytes: Vec<u8> = frame.iter().flat_map(|&(hid, h, l)| [hid, h, l]).collect();
+    let saved = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .map_err(crate::Error::from)
+        .and_then(|()| crate::fs_utils::secure_write(&path, &bytes));
+    if let Err(e) = saved {
+        tracing::warn!("Could not save the actuation frame to {}: {e}", path.display());
+    }
+}
+
+/// Apply per-key changes `(hid, tenths of a mm)` to a saved frame, keeping every other key as it was.
+fn merge_actuation(base: &[(u8, u8, u8)], layer: HallLayer, changes: &[(u8, u8)]) -> Result<AnalogSetting> {
+    let mut keys = base.to_vec();
+    for &(hid, tenths_mm) in changes {
+        let (h, l) = actuation_raw(tenths_mm)?;
+        let entry = keys.iter_mut().find(|k| k.0 == hid).ok_or_else(|| {
+            crate::Error::InvalidConfig(format!("HID usage {hid:#04x} has no analog switch on this board"))
+        })?;
+        *entry = (hid, h, l);
+    }
+    let setting = AnalogSetting::Thresholds { layer, keys };
+    hall_frame(&setting)?;
+    Ok(setting)
+}
+
+/// [EXPERIMENTAL] A per-key actuation change for the wired board, merged onto the last threshold frame ssgg
+/// sent for `layer`. The board has no confirmed read-back, so with no saved frame this refuses rather than
+/// guess the other 67 keys: send `ssgg actuation set <mm>` (all keys) first.
+///
+/// # Errors
+///
+/// Returns an error when no frame was saved, a key has no analog switch, or a distance is not captured.
+pub fn key_actuation_setting(layer: HallLayer, changes: &[(u8, u8)]) -> Result<AnalogSetting> {
+    let base = actuation_frame_path(layer)
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|bytes| {
+            bytes
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|e| (e[0], e[1], e[2]))
+                .collect::<Vec<_>>()
+        })
+        .filter(|frame| frame.len() == analog_keys().len())
+        .ok_or_else(|| {
+            crate::Error::InvalidConfig(format!(
+                "no saved {layer:?}-layer actuation frame: set every key once with `ssgg actuation set <mm>{}` \
+                 so ssgg knows the other keys' values",
+                if layer == HallLayer::Second { " --second" } else { "" }
+            ))
+        })?;
+    merge_actuation(&base, layer, changes)
+}
+
+/// [EXPERIMENTAL] What a Gen3 on-board profile read collected: the firmware poll answer, the 3-byte header of
+/// every chunk reply (meaning unknown, recorded for the hardware check), and the reassembled profile blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gen3ProfileRead {
+    pub firmware: Option<String>,
+    pub headers: Vec<Vec<u8>>,
+    pub data: Vec<u8>,
+}
+
+impl Gen3ProfileRead {
+    /// Whether the blob's stored checksum at offset 12320 matches its contents.
+    pub fn checksum_ok(&self) -> bool {
+        checksum_matches(&self.data)
+    }
+}
+
+/// [EXPERIMENTAL] The chunk requests of a slot read, in order: `PROFILE_LEN / 500` = 25 chunks.
+///
+/// # Errors
+///
+/// Returns an error for a slot outside 0-4.
+pub fn gen3_read_requests(slot: u8) -> Result<Vec<Gen3ProfileReadCommand>> {
+    if slot >= Gen3ProfileReadCommand::SLOTS {
+        return Err(crate::Error::InvalidConfig(format!(
+            "profile slot {slot} out of range 0-{}",
+            Gen3ProfileReadCommand::SLOTS - 1
+        )));
+    }
+    let chunk = usize::from(Gen3ProfileReadCommand::CHUNK_LEN);
+    Ok((0..PROFILE_LEN.div_ceil(chunk))
+        .map(|i| Gen3ProfileReadCommand {
+            fs_id: Gen3ProfileReadCommand::FIRST_PROFILE_FS + slot,
+            size: Gen3ProfileReadCommand::CHUNK_LEN,
+            offset: (i * chunk) as u32,
+        })
+        .collect())
+}
+
+/// Split chunk replies (report-ID byte first, as hidapi returns them) into their headers and the blob.
+fn assemble_gen3_replies(replies: &[Vec<u8>]) -> Result<(Vec<Vec<u8>>, Vec<u8>)> {
+    let head = Gen3ProfileReadCommand::REPLY_HEADER_LEN;
+    let chunk = usize::from(Gen3ProfileReadCommand::CHUNK_LEN);
+    let mut headers = Vec::with_capacity(replies.len());
+    let mut data = Vec::with_capacity(PROFILE_LEN);
+    for (i, reply) in replies.iter().enumerate() {
+        let body = reply.get(head..head + chunk).ok_or_else(|| {
+            crate::Error::DeviceCommunication(format!(
+                "profile read chunk {i}: reply of {} bytes, needs {}",
+                reply.len(),
+                head + chunk
+            ))
+        })?;
+        headers.push(reply[..head].to_vec());
+        data.extend_from_slice(body);
+    }
+    data.truncate(PROFILE_LEN);
+    Ok((headers, data))
+}
+
+/// Whether a firmware version (`1.19.7`, `V1.19.7`, ...) is 1.19.7 or newer, OpenRGB's Gen 3 cut-off.
+fn is_gen3_firmware(version: &str) -> bool {
+    let digits = version.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let mut parts = digits.split('.').map(|p| {
+        p.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    });
+    match (parts.next().flatten(), parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor), Some(patch)) => (major, minor, patch) >= (1, 19, 7),
+        _ => false,
+    }
+}
+
+/// Firmware version in a Gen3 `90` answer: `[report ID] 90 <err> <ASCII>`; hidapi may or may not keep the
+/// report-ID byte, so the answer is located by its command byte. GG treats a version starting with `@`
+/// (0x40) as an error answer.
+fn parse_gen3_firmware(reply: &[u8]) -> Option<String> {
+    let at = reply
+        .iter()
+        .position(|&b| b == CommandCode::OnboardFirmwareVersion as u8)?;
+    super::apex_7_profile::parse_firmware_version(reply.get(at + 2..)?).filter(|v| !v.starts_with('@'))
 }
 
 /// Colour of `usage` in a per-key request (last entry wins), else its colour in `previous`, else black.
@@ -120,6 +386,9 @@ fn parse_last_frame(bytes: &[u8]) -> Vec<(u8, Color)> {
 pub struct ApexProTkl2023 {
     inner: GenericKeyboard,
     initialized_new_protocol: bool,
+    /// Firmware probe result for the models whose protocol depends on it (`firmware_switches_protocol`):
+    /// `None` until probed, then whether the firmware is 1.19.7 or newer.
+    gen3_firmware: Option<bool>,
     /// Software brightness (0-100) applied to every direct frame; see `set_direct_brightness`.
     brightness: u8,
 }
@@ -133,6 +402,7 @@ impl ApexProTkl2023 {
         Self {
             inner: keyboard,
             initialized_new_protocol: false,
+            gen3_firmware: None,
             brightness: 100,
         }
     }
@@ -143,6 +413,7 @@ impl ApexProTkl2023 {
         Self {
             inner: GenericKeyboard::new_without_device(info),
             initialized_new_protocol: false,
+            gen3_firmware: None,
             brightness: 100,
         }
     }
@@ -162,14 +433,11 @@ impl ApexProTkl2023 {
     /// [EXPERIMENTAL] Apex 5, Apex 7 TKL, Apex Pro TKL (original) and Apex Pro (2024) share it; those four
     /// come from a community fork's table, unverified, and never ran on hardware here.
     fn is_gen1(&self) -> bool {
-        matches!(
-            self.inner.info().product_id,
-            product_ids::APEX_PRO
-                | product_ids::APEX_PRO_TKL
-                | product_ids::APEX_7_TKL
-                | product_ids::APEX_5
-                | product_ids::APEX_PRO_2024
-        )
+        match self.inner.info().product_id {
+            product_ids::APEX_PRO_TKL => self.gen3_firmware != Some(true),
+            product_ids::APEX_PRO | product_ids::APEX_7_TKL | product_ids::APEX_5 | product_ids::APEX_PRO_2024 => true,
+            _ => false,
+        }
     }
 
     /// [EXPERIMENTAL] The Apex 9 TKL / Apex 9 Mini take the `0x40` frame in a 513-byte report with no
@@ -181,9 +449,33 @@ impl ApexProTkl2023 {
         )
     }
 
+    /// [EXPERIMENTAL] Models whose protocol OpenRGB picks by firmware (`SendInitialization`): from 1.19.7 they
+    /// take the Gen 3 init (`0x4B`), and the original Apex Pro TKL moves from `0x3A` to the `0x40` frame.
+    fn firmware_switches_protocol(&self) -> bool {
+        matches!(
+            self.inner.info().product_id,
+            product_ids::APEX_PRO_TKL | product_ids::APEX_9_TKL | product_ids::APEX_9_MINI
+        )
+    }
+
     /// Whether the 0x4B init report has to precede the first direct frame.
     fn needs_init(&self) -> bool {
+        if self.firmware_switches_protocol() {
+            return self.gen3_firmware == Some(true);
+        }
         !(self.is_wired_2023() || self.is_gen1() || self.is_apex_9())
+    }
+
+    /// Probe the firmware once on the models it matters for; a failed or unparsable poll keeps the
+    /// pre-probe protocol, as OpenRGB does.
+    fn probe_firmware(&mut self) {
+        if self.gen3_firmware.is_some() || !self.firmware_switches_protocol() {
+            return;
+        }
+        let version = self.gen3_firmware_version();
+        let gen3 = version.as_deref().is_some_and(is_gen3_firmware);
+        tracing::info!("firmware {version:?}: Gen 3 protocol {gen3}");
+        self.gen3_firmware = Some(gen3);
     }
 
     fn direct_keys(&self) -> &'static [u8] {
@@ -204,17 +496,6 @@ impl ApexProTkl2023 {
         }
     }
 
-    /// Whether this is a wireless variant.
-    fn is_wireless(&self) -> bool {
-        matches!(
-            self.inner.info().product_id,
-            product_ids::APEX_PRO_TKL_2023_WIRELESS
-                | product_ids::APEX_PRO_TKL_2023_WIRELESS_2
-                | product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE
-                | product_ids::APEX_PRO_TKL_WIRELESS_2024
-        )
-    }
-
     /// Direct-mode packet ID, or `None` if the model does not speak the 643-byte
     /// feature-report protocol.
     ///
@@ -227,6 +508,7 @@ impl ApexProTkl2023 {
             | product_ids::APEX_PRO_TKL_2023_WIRELESS_2
             | product_ids::APEX_PRO_TKL_WIRELESS_2024_DONGLE
             | product_ids::APEX_PRO_TKL_WIRELESS_2024 => CommandCode::Apex2023DirectWireless,
+            product_ids::APEX_PRO_TKL if self.gen3_firmware == Some(true) => CommandCode::Apex2023Direct,
             product_ids::APEX_PRO_TKL_2024
             | product_ids::APEX_PRO_TKL_2023
             | product_ids::APEX_9_TKL
@@ -257,6 +539,7 @@ impl ApexProTkl2023 {
 
     /// Send one direct-mode feature report covering every key in `direct_keys()`.
     fn send_direct_frame(&mut self, color_for: impl Fn(u8) -> Color) -> Result<()> {
+        self.probe_firmware();
         self.ensure_new_protocol_init()?;
         let entries = self.direct_entries(color_for);
         let buf = self.frame_for(&entries)?;
@@ -363,10 +646,103 @@ impl ApexProTkl2023 {
         Ok(())
     }
 
+    /// On the wired board this sends the spec's live hall thresholds for every analog key (only the captured
+    /// distances are accepted); elsewhere the unverified `0x2D` guess, a confirmed no-op on `0x1628`.
     pub fn set_actuation_point(&mut self, value: u8) -> Result<()> {
+        if self.is_wired_2023() {
+            self.send_analog_setting(&AnalogSetting::Actuation {
+                layer: HallLayer::Primary,
+                tenths_mm: Some(value),
+            })?;
+            self.inner.update_cached_actuation_point(value);
+            return Ok(());
+        }
         let command = ActuationCommand::new(value);
         command.validate()?;
         self.send_actuation_command(command)
+    }
+
+    fn require_wired_2023(&self, what: &str) -> Result<()> {
+        if self.is_wired_2023() {
+            return Ok(());
+        }
+        Err(crate::Error::DeviceCommunication(format!(
+            "{what} is only defined for the wired Apex Pro TKL 2023 (0x1628), not {:#06x}",
+            self.inner.info().product_id
+        )))
+    }
+
+    /// Send a report (report-ID byte first) as a feature report or as an output report, bytes as given.
+    /// Not `send_raw`: that path prepends a second report-ID byte and drops repeated reports.
+    fn send_report(&mut self, report: &[u8], feature: bool) -> Result<()> {
+        if feature {
+            self.inner.send_feature(report, report.len())
+        } else {
+            self.inner.write_profile_packet(report)
+        }
+    }
+
+    /// [EXPERIMENTAL] Send one live analog-key setting, see [`AnalogSetting`]. Wired board only.
+    pub fn send_analog_setting(&mut self, setting: &AnalogSetting) -> Result<()> {
+        self.require_wired_2023("a live analog-key setting")?;
+        let (report, feature) = analog_report(setting)?;
+        self.send_report(&report, feature)?;
+        if let Some((layer, frame)) = hall_frame(setting)? {
+            save_actuation_frame(layer, &frame);
+        }
+        Ok(())
+    }
+
+    /// [EXPERIMENTAL] Send one display command (leave direct mode, OLED write or reset). Wired board only.
+    pub fn send_display_command(&mut self, command: Apex2022DisplayCommand<'_>) -> Result<()> {
+        self.require_wired_2023("this display command")?;
+        let mut buf = vec![0u8; PROFILE_CHUNK_REPORT_SIZE];
+        let size = HidReportBuilder::new(HidDeviceType::Keyboard).build_report(command, &mut buf)?;
+        self.send_report(&buf[..size], matches!(command, Apex2022DisplayCommand::Oled(_)))
+    }
+
+    /// [EXPERIMENTAL] Read one on-board profile slot (0-4) with the spec's `83 01` chunk read. Read only:
+    /// nothing here writes to the board. Untested on hardware.
+    pub fn read_gen3_profile(&mut self, slot: u8) -> Result<Gen3ProfileRead> {
+        self.require_wired_2023("the Gen3 on-board profile read")?;
+        let requests = gen3_read_requests(slot)?;
+        let gap = std::time::Duration::from_millis(Gen3ProfileReadCommand::COMMAND_GAP_MS);
+        let firmware = self.gen3_firmware_version();
+        let builder = HidReportBuilder::new(HidDeviceType::Keyboard);
+        let mut replies = Vec::with_capacity(requests.len());
+        for request in requests {
+            std::thread::sleep(gap);
+            let mut buf = vec![0u8; PROFILE_CHUNK_REPORT_SIZE];
+            let size = builder.build_report(request, &mut buf)?;
+            self.inner.send_feature(&buf[..size], size)?;
+            std::thread::sleep(gap);
+            replies.push(
+                self.inner
+                    .read_profile_feature_packet(0x00, PROFILE_CHUNK_REPORT_SIZE)?,
+            );
+        }
+        let (headers, data) = assemble_gen3_replies(&replies)?;
+        Ok(Gen3ProfileRead {
+            firmware,
+            headers,
+            data,
+        })
+    }
+
+    /// The `90 00` firmware poll (GG `fw_version`); informational, so a failure is logged and gives `None`.
+    fn gen3_firmware_version(&self) -> Option<String> {
+        let mut buf = [0u8; KEYBOARD_REPORT_SIZE];
+        let poll = HidReportBuilder::new(HidDeviceType::Keyboard)
+            .build_report(OnboardFirmwareVersionCommand::KEYBOARD, &mut buf)
+            .and_then(|size| self.inner.write_profile_packet(&buf[..size]))
+            .and_then(|()| self.inner.read_profile_input_packet(KEYBOARD_REPORT_SIZE, 200));
+        match poll {
+            Ok(reply) => reply.as_deref().and_then(parse_gen3_firmware),
+            Err(e) => {
+                tracing::warn!("firmware poll failed: {e}");
+                None
+            }
+        }
     }
 
     /// Set actuation point in millimeters.
@@ -388,9 +764,10 @@ impl Device for ApexProTkl2023 {
     }
 
     fn initialize(&mut self) -> Result<()> {
-        // Wireless variant uses feature reports for init, not output reports.
-        // The 0x4B init is sent lazily in ensure_new_protocol_init().
-        if self.is_wireless() || self.is_gen1() || self.is_apex_9() {
+        // Direct-protocol models get no APPLY (0x09): it reverts direct lighting, GG's 0x1628 capture never sends
+        // it, and before the report-ID fix it reached the board shifted (as `00 09`), so the confirmed 0x1628
+        // lighting results ran without it. The 0x4B init is sent lazily in ensure_new_protocol_init().
+        if self.uses_new_protocol() {
             return Ok(());
         }
         self.inner.initialize()
@@ -499,6 +876,18 @@ crate::impl_keyboard_with_delegation!(ApexProTkl2023, {
 
     fn set_actuation_point_mm(&mut self, mm: f32) -> Result<()> {
         self.set_actuation_point_mm(mm)
+    }
+
+    fn send_analog_setting(&mut self, setting: &AnalogSetting) -> Result<()> {
+        self.send_analog_setting(setting)
+    }
+
+    fn send_display_command(&mut self, command: Apex2022DisplayCommand<'_>) -> Result<()> {
+        self.send_display_command(command)
+    }
+
+    fn read_gen3_profile(&mut self, slot: u8) -> Result<Gen3ProfileRead> {
+        self.read_gen3_profile(slot)
     }
 });
 
@@ -662,6 +1051,181 @@ mod tests {
         for (usage, slot) in captured {
             assert_eq!(profile_slot(usage), Some(slot), "usage {usage:#04x}");
         }
+    }
+
+    #[test]
+    fn analog_frames_cover_the_68_keys_in_hid_order() {
+        let (report, feature) = analog_report(&AnalogSetting::Actuation {
+            layer: HallLayer::Primary,
+            tenths_mm: Some(20),
+        })
+        .unwrap();
+        assert!(feature);
+        assert_eq!(report.len(), 645);
+        assert_eq!(&report[..8], &[0x00, 0x38, 0x61, 68, 0x00, 0x04, 0x39, 0x34]);
+        let hids: Vec<u8> = report[5..5 + 68 * 3].iter().step_by(3).copied().collect();
+        assert!(
+            hids.windows(2).all(|w| w[0] < w[1]),
+            "sorted, as GG's device-analog-hid-codes"
+        );
+        assert_eq!(hids.last(), Some(&0xF0));
+        assert!(report[5 + 68 * 3..].iter().all(|&b| b == 0));
+
+        let (cleared, _) = analog_report(&AnalogSetting::Actuation {
+            layer: HallLayer::Second,
+            tenths_mm: None,
+        })
+        .unwrap();
+        assert_eq!(&cleared[..8], &[0x00, 0x38, 0x61, 68, 0x02, 0x04, 0, 0]);
+
+        let (rt, _) = analog_report(&AnalogSetting::RapidTriggerSensitivity(2)).unwrap();
+        assert_eq!(&rt[..6], &[0x00, 0x38, 0x65, 68, 0x04, 2]);
+        assert_eq!(rt[4 + 68 * 2 - 1], 2);
+    }
+
+    #[test]
+    fn gen3_firmware_cut_off_is_1_19_7() {
+        for (version, gen3) in [
+            ("1.19.7", true),
+            ("1.19.6", false),
+            ("1.20.0", true),
+            ("2.0.0", true),
+            ("1.9.9", false),
+            ("V1.19.7", true),
+            ("1.19", false),
+            ("", false),
+        ] {
+            assert_eq!(is_gen3_firmware(version), gen3, "{version:?}");
+        }
+    }
+
+    #[test]
+    fn firmware_picks_the_original_pro_tkl_and_apex_9_protocol() {
+        let mut tkl = keyboard_for(product_ids::APEX_PRO_TKL);
+        assert_eq!(
+            tkl.direct_packet_id(),
+            Some(CommandCode::ApexGen1Direct),
+            "before or without a probe"
+        );
+        assert!(!tkl.needs_init());
+        tkl.gen3_firmware = Some(true);
+        assert_eq!(tkl.direct_packet_id(), Some(CommandCode::Apex2023Direct));
+        assert!(tkl.needs_init() && !tkl.is_gen1());
+        assert_eq!(tkl.direct_packet_length(), APEX_2023_PACKET_LENGTH);
+
+        let mut apex9 = keyboard_for(product_ids::APEX_9_TKL);
+        assert!(!apex9.needs_init());
+        apex9.gen3_firmware = Some(true);
+        assert!(apex9.needs_init());
+        assert_eq!(apex9.direct_packet_length(), APEX_9_PACKET_LENGTH);
+
+        let mut wired = keyboard_for(product_ids::APEX_PRO_TKL_2023);
+        wired.probe_firmware();
+        assert_eq!(wired.gen3_firmware, None, "0x1628 never probes");
+    }
+
+    #[test]
+    fn per_key_actuation_changes_only_the_named_keys() {
+        let base: Vec<(u8, u8, u8)> = analog_keys().iter().map(|&hid| (hid, 0x2F, 0x2A)).collect();
+        let merged = merge_actuation(&base, HallLayer::Primary, &[(0x1A, 20), (0x04, 30)]).unwrap();
+        let (report, _) = analog_report(&merged).unwrap();
+        let entries: Vec<&[u8]> = report[5..5 + 68 * 3].chunks(3).collect();
+        for entry in &entries {
+            let expected: &[u8] = match entry[0] {
+                0x1A => &[0x1A, 0x39, 0x34],
+                0x04 => &[0x04, 0x86, 0x7B],
+                hid => &[hid, 0x2F, 0x2A],
+            };
+            assert_eq!(*entry, expected);
+        }
+        assert!(
+            merge_actuation(&base, HallLayer::Primary, &[(0x29, 20)]).is_err(),
+            "Esc is not analog"
+        );
+        assert!(
+            merge_actuation(&base, HallLayer::Primary, &[(0x1A, 15)]).is_err(),
+            "1.5 mm not captured"
+        );
+        assert!(
+            merge_actuation(&base[..67], HallLayer::Primary, &[(0x1A, 20)]).is_err(),
+            "base must be complete"
+        );
+    }
+
+    #[test]
+    fn analog_settings_refuse_unknown_points_and_non_analog_keys() {
+        let at = |tenths| AnalogSetting::Actuation {
+            layer: HallLayer::Primary,
+            tenths_mm: Some(tenths),
+        };
+        assert!(analog_report(&at(15)).is_err());
+        assert!(analog_report(&AnalogSetting::ReleaseMode(1)).is_err());
+        let pair = |hid_2| RapidTapPair {
+            hid_1: 0x04,
+            hid_2,
+            mode: 0,
+            report_both: false,
+        };
+        assert!(
+            analog_report(&AnalogSetting::RapidTapPairs(vec![pair(0x29)])).is_err(),
+            "Esc is not analog"
+        );
+        assert!(analog_report(&AnalogSetting::RapidTapPairs(vec![pair(0x07)])).is_ok());
+    }
+
+    #[test]
+    fn non_wired_models_refuse_spec_commands() {
+        let mut keyboard = keyboard_for(product_ids::APEX_PRO_TKL_2024);
+        assert!(keyboard.send_analog_setting(&AnalogSetting::RapidTap(true)).is_err());
+        assert!(keyboard.read_gen3_profile(0).is_err());
+        assert!(
+            keyboard
+                .send_display_command(Apex2022DisplayCommand::ClearDirect)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn gen3_read_requests_walk_the_blob_in_500_byte_chunks() {
+        let requests = gen3_read_requests(4).unwrap();
+        assert_eq!(requests.len(), 25);
+        assert!(requests.iter().all(|r| r.fs_id == 0x84 && r.size == 500));
+        assert_eq!(requests[24].offset, 12_000);
+        assert!(gen3_read_requests(5).is_err());
+    }
+
+    #[test]
+    fn gen3_replies_reassemble_behind_the_header() {
+        let replies: Vec<Vec<u8>> = (0..25u8)
+            .map(|i| {
+                let mut reply = vec![0x00, 0x83, 0x01];
+                reply.extend(std::iter::repeat_n(i, 500));
+                reply.extend([0xEE; 142]);
+                reply
+            })
+            .collect();
+        let (headers, data) = assemble_gen3_replies(&replies).unwrap();
+        assert_eq!(data.len(), PROFILE_LEN);
+        assert_eq!((data[0], data[499], data[500], data[PROFILE_LEN - 1]), (0, 0, 1, 24));
+        assert!(headers.iter().all(|h| h == &[0x00, 0x83, 0x01]));
+
+        let short = vec![vec![0u8; 400]];
+        assert!(assemble_gen3_replies(&short).is_err());
+    }
+
+    #[test]
+    fn gen3_firmware_answer_is_found_with_or_without_the_report_id() {
+        let mut reply = vec![0x00, 0x90, 0x00];
+        reply.extend(b"1.19.7");
+        reply.resize(65, 0);
+        assert_eq!(parse_gen3_firmware(&reply).as_deref(), Some("1.19.7"));
+        assert_eq!(parse_gen3_firmware(&reply[1..]).as_deref(), Some("1.19.7"));
+        assert_eq!(
+            parse_gen3_firmware(&[0x90, 0x00, b'@', b'1']),
+            None,
+            "GG's error answer"
+        );
+        assert_eq!(parse_gen3_firmware(&[0x00; 8]), None);
     }
 
     #[test]

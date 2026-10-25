@@ -10,8 +10,7 @@ pub mod onboard;
 
 use super::diagnostics::{HidOperation, with_global_diagnostics};
 use super::hid_reports::{
-    ApplyCommand, BrightnessCommand, HidDeviceType, HidReportBuilder, PerKeyRgbBuilder, PerKeyRgbCommand,
-    RgbZoneCommand,
+    BrightnessCommand, HidDeviceType, HidReportBuilder, PerKeyRgbBuilder, PerKeyRgbCommand, RgbZoneCommand,
 };
 use super::key_mapping::{KeyAddress, KeyId, KeyMapping, KeyMappingDatabase};
 use super::zone_mapping::{ZoneEffect, ZoneFallback, ZoneMapping as ZoneMap};
@@ -213,6 +212,33 @@ pub trait Keyboard: Device {
         ))
     }
 
+    /// [EXPERIMENTAL] Send a live analog-key setting (actuation, release mode, rapid trigger, rapid tap).
+    /// Only the wired Apex Pro TKL 2023 (`0x1628`) defines these; other keyboards return an error.
+    fn send_analog_setting(&mut self, _setting: &apex_pro_tkl_2023::AnalogSetting) -> Result<()> {
+        Err(Error::DeviceCommunication(
+            "live analog-key settings are not supported by this keyboard".to_string(),
+        ))
+    }
+
+    /// [EXPERIMENTAL] Send a 2022-firmware display command (leave direct mode, OLED). Wired Apex Pro TKL 2023
+    /// only; other keyboards return an error.
+    fn send_display_command(
+        &mut self,
+        _command: crate::devices::hid_reports::Apex2022DisplayCommand<'_>,
+    ) -> Result<()> {
+        Err(Error::DeviceCommunication(
+            "this display command is not supported by this keyboard".to_string(),
+        ))
+    }
+
+    /// [EXPERIMENTAL] Read-only Gen3 on-board profile read of one slot (0-4). Wired Apex Pro TKL 2023 only;
+    /// other keyboards return an error.
+    fn read_gen3_profile(&mut self, _slot: u8) -> Result<apex_pro_tkl_2023::Gen3ProfileRead> {
+        Err(Error::DeviceCommunication(
+            "the Gen3 on-board profile read is not supported by this keyboard".to_string(),
+        ))
+    }
+
     // === On-board profiles ===
 
     /// The on-board profile protocol this keyboard speaks, as the family codec that can read and write
@@ -371,14 +397,15 @@ impl GenericKeyboard {
 
         let device = self.connected_device()?.lock();
 
+        // `data` is builder output, report ID first; prepending another shifted every command by one byte.
         let result = if let Some(result) = with_global_diagnostics(|diag| {
             diag.record_timed_operation(HidOperation::Send, data, || {
-                write_padded_report(&device, data, 65, true)
+                write_padded_report(&device, data, 65, false)
             })
         }) {
             result
         } else {
-            write_padded_report(&device, data, 65, true)
+            write_padded_report(&device, data, 65, false)
         };
 
         if result.is_ok() {
@@ -421,12 +448,12 @@ impl GenericKeyboard {
 
             if let Some(result) = with_global_diagnostics(|diag| {
                 diag.record_timed_operation(HidOperation::Send, &data, || {
-                    write_padded_report(&device, &data, 65, true)
+                    write_padded_report(&device, &data, 65, false)
                 })
             }) {
                 result
             } else {
-                write_padded_report(&device, &data, 65, true)
+                write_padded_report(&device, &data, 65, false)
             }
         })
         .await
@@ -565,10 +592,9 @@ impl Device for GenericKeyboard {
         DeviceType::Keyboard
     }
 
+    // No APPLY (`00 09`): GG's specs name it `save_to_flash` on several Apex families, a persistent write, and
+    // before the report-ID fix (2026-10-25) it only ever reached boards shifted, as an unknown `00` command.
     fn initialize(&mut self) -> Result<()> {
-        let mut buffer = [0u8; 65];
-        let size = self.report_builder.build_report(ApplyCommand, &mut buffer)?;
-        self.send_report(&buffer[..size])?;
         Ok(())
     }
 
@@ -649,11 +675,9 @@ impl Keyboard for GenericKeyboard {
         self.send_command_async(BrightnessCommand::new(brightness)).await
     }
 
+    // No APPLY, for the reason on `initialize`.
     async fn apply(&mut self) -> Result<()> {
-        let apply_command = ApplyCommand;
-        let mut buffer = [0u8; 65];
-        let size = self.report_builder.build_report(apply_command, &mut buffer)?;
-        self.send_report_async(&buffer[..size]).await
+        Ok(())
     }
 
     // === Per-Key RGB Control Implementation ===

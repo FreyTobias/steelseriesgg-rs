@@ -214,6 +214,46 @@ fn get_hid_optimizer() -> &'static HidOptimizer {
     HID_OPTIMIZER.get_or_init(HidOptimizer::new)
 }
 
+/// The bytes `write_padded_report` puts on the wire: `data` zero-padded to `report_len` (at most 65), behind a
+/// prepended `00` report ID when `include_report_id` is set. `HidReportBuilder` output already starts with
+/// the report ID, so it must be passed with `include_report_id = false`.
+fn pad_report(data: &[u8], report_len: usize, include_report_id: bool) -> ([u8; 65], usize) {
+    let mut report = [0u8; 65];
+    let offset = usize::from(include_report_id);
+    let effective_len = report_len.min(report.len());
+    let copy_len = data.len().min(effective_len.saturating_sub(offset));
+    report[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
+    (report, effective_len)
+}
+
+#[cfg(test)]
+mod pad_report_tests {
+    use super::*;
+
+    #[test]
+    fn builder_output_reaches_the_wire_unchanged() {
+        let mut built = [0u8; KEYBOARD_REPORT_SIZE];
+        let size = HidReportBuilder::new(HidDeviceType::Keyboard)
+            .build_report(ApplyCommand, &mut built)
+            .unwrap();
+        let (wire, len) = pad_report(&built[..size], 65, false);
+        assert_eq!(
+            &wire[..len],
+            &built[..],
+            "report ID then 09, as the confirmed Apex 7 path writes"
+        );
+        assert_eq!(&wire[..2], &[0x00, 0x09]);
+
+        let (shifted, _) = pad_report(&built[..size], 65, true);
+        assert_eq!(
+            &shifted[..3],
+            &[0x00, 0x00, 0x09],
+            "the old keyboard path's shifted frame"
+        );
+        assert_eq!(pad_report(&[1, 2], 64, false).1, 64);
+    }
+}
+
 /// Write a padded HID report, handling the optional leading report ID byte and
 /// constraining to the standard 64/65 byte HID buffers.
 /// This is the optimized version that includes caching and deduplication.
@@ -227,15 +267,7 @@ pub fn write_padded_report(device: &HidDevice, data: &[u8], report_len: usize, i
         )));
     }
 
-    let mut report = [0u8; 65];
-    let offset = if include_report_id { 1 } else { 0 };
-    let effective_len = report_len.min(report.len());
-    let copy_len = data.len().min(effective_len.saturating_sub(offset));
-
-    if copy_len > 0 {
-        report[offset..offset + copy_len].copy_from_slice(&data[..copy_len]);
-    }
-
+    let (report, effective_len) = pad_report(data, report_len, include_report_id);
     let report_data = &report[..effective_len];
 
     // Check for duplicate reports to reduce unnecessary I/O
@@ -245,9 +277,9 @@ pub fn write_padded_report(device: &HidDevice, data: &[u8], report_len: usize, i
     }
 
     debug!(
-        "Writing optimized HID report: len={}, offset={}, data={:02x?}",
+        "Writing optimized HID report: len={}, report id prepended={}, data={:02x?}",
         effective_len,
-        offset,
+        include_report_id,
         &report_data[..effective_len.min(16)] // Show first 16 bytes to reduce log overhead
     );
 
@@ -419,7 +451,8 @@ pub mod product_ids {
     pub const ARCTIS_1_WIRELESS: u16 = 0x12B3; // arctis_1w_tx
     pub const ARCTIS_9: u16 = 0x12C2; // arctis_9_tx
     pub const ARCTIS_NOVA_PRO_WIRED: u16 = 0x12CB; // arctis_nova_pro (wired, GG firmware)
-    // 0x12CF not found in GG firmware registry; community-reported PID for Arctis 7 2019.
+    // 0x12CF was community-reported as the Arctis 7 2019, but GG's decrypted device spec defines it as
+    // `arctis_nova_pro_xbox_bootloader_id` (2026-10-25): detect-only, never written to.
     pub const ARCTIS_7_2019: u16 = 0x12CF;
     // 0x12E0 is the Nova Pro Wireless TX dongle in GG firmware (arctis_nova_pro_wireless_tx).
     pub const ARCTIS_NOVA_PRO: u16 = 0x12E0;
@@ -459,6 +492,26 @@ pub mod product_ids {
     pub const ARCTIS_NOVA_7P_V2: u16 = 0x22A7;
     pub const ARCTIS_NOVA_7_DIABLO_IV_V2: u16 = 0x22A9;
     pub const ARCTIS_NOVA_7X_V2_ALT: u16 = 0x22AD;
+    // Arctis 7+ family, TX ids. PIDs and protocol from GG's decrypted device specs (`base_arctis_7_plus_tx`,
+    // 2026-10-25), untested; behaviour table in headsets::nova7.
+    pub const ARCTIS_7_PLUS: u16 = 0x220E;
+    pub const ARCTIS_7P_PLUS: u16 = 0x2212;
+    pub const ARCTIS_7X_PLUS: u16 = 0x2216;
+    pub const ARCTIS_7_PLUS_DESTINY_2: u16 = 0x2236;
+    // Further Nova 7 frame users, TX ids, from GG's decrypted device specs (2026-10-25), untested; behaviour
+    // table in headsets::nova7.
+    pub const ARCTIS_NOVA_4: u16 = 0x12F2;
+    pub const ARCTIS_NOVA_4X: u16 = 0x12F6;
+    pub const ARCTIS_NOVA_7_WOW_UPGRADE: u16 = 0x22AB;
+    pub const ARCTIS_NOVA_5X: u16 = 0x2253;
+    pub const ARCTIS_NOVA_5X_WHITE: u16 = 0x2264;
+    pub const ARCTIS_NOVA_3X_WIRELESS: u16 = 0x226D;
+    // Nova Pro family siblings (GG specs `arctis_nova_pro_xbox`, `arctis_nova_pro_v2`,
+    // `arctis_nova_pro_wireless_xbox_tx`, `arctis_nova_pro_wireless_xbox_white_tx`), untested.
+    pub const ARCTIS_NOVA_PRO_XBOX: u16 = 0x12CD;
+    pub const ARCTIS_NOVA_PRO_V2: u16 = 0x12FA;
+    pub const ARCTIS_NOVA_PRO_WIRELESS_XBOX: u16 = 0x12E5;
+    pub const ARCTIS_NOVA_PRO_WIRELESS_XBOX_WHITE: u16 = 0x225D;
     // Mice, Modern family. PIDs from a community rivalcfg-derived fork, untested; behaviour table in mice::modern.
     pub const AEROX_3: u16 = 0x1836;
     pub const AEROX_3_WIRELESS: u16 = 0x183A;
@@ -488,7 +541,10 @@ pub mod product_ids {
 
 /// Devices registered for detection only: no protocol is known, so `ssgg` must not write to them.
 pub fn is_detect_only(product_id: u16) -> bool {
-    matches!(product_id, product_ids::ARCTIS_NOVA_PRO_OMNI)
+    matches!(
+        product_id,
+        product_ids::ARCTIS_NOVA_PRO_OMNI | product_ids::ARCTIS_7_2019
+    )
 }
 
 /// Get device type from product ID.
@@ -558,7 +614,21 @@ pub fn device_type_from_product_id(product_id: u16) -> DeviceType {
         | ARCTIS_NOVA_7X_ALT_V2
         | ARCTIS_NOVA_7P_V2
         | ARCTIS_NOVA_7_DIABLO_IV_V2
-        | ARCTIS_NOVA_7X_V2_ALT => DeviceType::Headset,
+        | ARCTIS_NOVA_7X_V2_ALT
+        | ARCTIS_7_PLUS
+        | ARCTIS_7P_PLUS
+        | ARCTIS_7X_PLUS
+        | ARCTIS_7_PLUS_DESTINY_2
+        | ARCTIS_NOVA_4
+        | ARCTIS_NOVA_4X
+        | ARCTIS_NOVA_7_WOW_UPGRADE
+        | ARCTIS_NOVA_5X
+        | ARCTIS_NOVA_5X_WHITE
+        | ARCTIS_NOVA_3X_WIRELESS
+        | ARCTIS_NOVA_PRO_XBOX
+        | ARCTIS_NOVA_PRO_V2
+        | ARCTIS_NOVA_PRO_WIRELESS_XBOX
+        | ARCTIS_NOVA_PRO_WIRELESS_XBOX_WHITE => DeviceType::Headset,
 
         // Mice (Modern family)
         AEROX_3
@@ -625,7 +695,7 @@ pub fn device_name_from_product_id(product_id: u16) -> &'static str {
         ARCTIS_1_WIRELESS => "Arctis 1 Wireless",
         ARCTIS_9 => "Arctis 9",
         ARCTIS_NOVA_PRO_WIRED => "Arctis Nova Pro",
-        ARCTIS_7_2019 => "Arctis 7 (2019)",
+        ARCTIS_7_2019 => "Arctis 7 (2019) / Nova Pro Xbox bootloader",
         ARCTIS_NOVA_PRO => "Arctis Nova Pro Wireless (TX)",
         ARCTIS_NOVA_PRO_WIRELESS => "Arctis Nova Pro Wireless",
         ARCTIS_NOVA_3 => "Arctis Nova 3",
@@ -654,6 +724,20 @@ pub fn device_name_from_product_id(product_id: u16) -> &'static str {
         ARCTIS_NOVA_7P_V2 => "Arctis Nova 7P v2",
         ARCTIS_NOVA_7_DIABLO_IV_V2 => "Arctis Nova 7 Diablo IV v2",
         ARCTIS_NOVA_7X_V2_ALT => "Arctis Nova 7X v2 (alt)",
+        ARCTIS_7_PLUS => "Arctis 7+",
+        ARCTIS_7P_PLUS => "Arctis 7P+",
+        ARCTIS_7X_PLUS => "Arctis 7X+",
+        ARCTIS_7_PLUS_DESTINY_2 => "Arctis 7+ Destiny 2",
+        ARCTIS_NOVA_4 => "Arctis Nova 4",
+        ARCTIS_NOVA_4X => "Arctis Nova 4X",
+        ARCTIS_NOVA_7_WOW_UPGRADE => "Arctis Nova 7 World of Warcraft (upgrade)",
+        ARCTIS_NOVA_5X => "Arctis Nova 5X",
+        ARCTIS_NOVA_5X_WHITE => "Arctis Nova 5X White",
+        ARCTIS_NOVA_3X_WIRELESS => "Arctis Nova 3X Wireless",
+        ARCTIS_NOVA_PRO_XBOX => "Arctis Nova Pro (Xbox)",
+        ARCTIS_NOVA_PRO_V2 => "Arctis Nova Pro v2",
+        ARCTIS_NOVA_PRO_WIRELESS_XBOX => "Arctis Nova Pro Wireless (Xbox, TX)",
+        ARCTIS_NOVA_PRO_WIRELESS_XBOX_WHITE => "Arctis Nova Pro Wireless White (Xbox, TX)",
         AEROX_3 => "Aerox 3",
         AEROX_3_WIRELESS => "Aerox 3 Wireless (wired)",
         AEROX_3_WIRELESS_DONGLE => "Aerox 3 Wireless (2.4 GHz)",

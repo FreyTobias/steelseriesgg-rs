@@ -63,8 +63,8 @@ pub enum CommandCode {
     /// [EXPERIMENTAL] Gen 3 init feature report (0x4B) sent once before the first direct frame, see
     /// [`DirectInitCommand`].
     Apex2023Init = 0x4B,
-    /// Actuation point control (0x2D) - EXPERIMENTAL
-    /// NOTE: This command code is experimental based on hardware research.
+    /// [EXPERIMENTAL] Actuation point guess (0x2D), unverified on every model and a confirmed no-op on the wired
+    /// Apex Pro TKL 2023 (2026-10-21), which now gets [`CommandCode::AnalogKeys`] instead.
     ActuationControl = 0x2D,
     /// [EXPERIMENTAL] Apex Pro TKL 2023 on-board profile chunk (0x03, header `03 01 80`), see
     /// `ProfileChunkCommand`. The legacy Apex family uses the same command code with a different header
@@ -120,6 +120,9 @@ pub enum CommandCode {
     /// [EXPERIMENTAL] Arctis Nova 7 family status query (0xB0, `00 b0`), answered by an input report that
     /// starts with `b0`, see [`HeadsetStatusQueryCommand`]. From community forks, untested on hardware.
     HeadsetStatus = 0xB0,
+    /// [EXPERIMENTAL] Nova Pro Wireless family battery query (0xB7, `06 b7`), see
+    /// [`HeadsetBatteryQueryCommand`]. From GG's decrypted device specs, untested on hardware.
+    HeadsetProBattery = 0xB7,
     /// [EXPERIMENTAL] Modern-family mouse polling rate (0x2B, `00 2b <code>`; 0x6B on a 2.4 GHz receiver PID),
     /// see [`MousePollRateCommand`]. From a community rivalcfg-derived fork, untested on hardware.
     MousePollRate = 0x2B,
@@ -135,6 +138,22 @@ pub enum CommandCode {
     /// [`CommandCode::RgbControl`] and [`CommandCode::Apex2023DirectWireless`]. From a community
     /// rivalcfg-derived fork, untested on hardware.
     MouseColor = 0xF3,
+    /// [EXPERIMENTAL] Apex 3 (`0x161A`) lighting, see [`Apex3Command`]. A tag, never a wire byte: the frames use
+    /// `0x0B` (colours) and `0x0A` (brightness). From GG's decrypted device spec, never sent on hardware.
+    Apex3Lighting = 0xF5,
+    /// [EXPERIMENTAL] Live analog-key settings of the 2022-firmware Apex boards (`00 38 <sub>`), see
+    /// [`AnalogKeyCommand`]. From GG's decrypted device spec, never sent from `ssgg` on hardware.
+    AnalogKeys = 0x38,
+    /// [EXPERIMENTAL] 2022-firmware on-board profile read, see [`Gen3ProfileReadCommand`]. A tag, never a wire
+    /// byte: the wire header is `83 01`, and 0x83 already belongs to [`CommandCode::OnboardBufferRead`] (legacy
+    /// header `83 00`). From GG's decrypted device spec, never sent from `ssgg` on hardware.
+    Gen3ProfileRead = 0xF4,
+    /// [EXPERIMENTAL] Leave direct-mode lighting (`00 41`, GG `clear_direct_write`), see
+    /// [`Apex2022DisplayCommand`]. From GG's decrypted device spec, never sent from `ssgg` on hardware.
+    Apex2023DirectClear = 0x41,
+    /// [EXPERIMENTAL] OLED direct write / reset (`00 1F 81|82`), see [`Apex2022DisplayCommand`]. From GG's
+    /// decrypted device spec, never sent from `ssgg` on hardware.
+    Apex2023Oled = 0x1F,
 }
 
 impl fmt::Display for CommandCode {
@@ -168,10 +187,16 @@ impl fmt::Display for CommandCode {
             CommandCode::HeadsetMicVolume => write!(f, "HEADSET_MIC_VOLUME_EXPERIMENTAL"),
             CommandCode::HeadsetAutoOff => write!(f, "HEADSET_AUTO_OFF_EXPERIMENTAL"),
             CommandCode::HeadsetStatus => write!(f, "HEADSET_STATUS_EXPERIMENTAL"),
+            CommandCode::HeadsetProBattery => write!(f, "HEADSET_PRO_BATTERY_EXPERIMENTAL"),
             CommandCode::MousePollRate => write!(f, "MOUSE_POLL_RATE_EXPERIMENTAL"),
             CommandCode::MouseBattery => write!(f, "MOUSE_BATTERY_EXPERIMENTAL"),
             CommandCode::MouseDpi => write!(f, "MOUSE_DPI_EXPERIMENTAL"),
             CommandCode::MouseColor => write!(f, "MOUSE_COLOR_EXPERIMENTAL"),
+            CommandCode::Apex3Lighting => write!(f, "APEX_3_LIGHTING_EXPERIMENTAL"),
+            CommandCode::AnalogKeys => write!(f, "ANALOG_KEYS_EXPERIMENTAL"),
+            CommandCode::Gen3ProfileRead => write!(f, "GEN3_PROFILE_READ_EXPERIMENTAL"),
+            CommandCode::Apex2023DirectClear => write!(f, "APEX2023_DIRECT_CLEAR_EXPERIMENTAL"),
+            CommandCode::Apex2023Oled => write!(f, "APEX2023_OLED_EXPERIMENTAL"),
         }
     }
 }
@@ -207,8 +232,12 @@ impl CommandCode {
             0x37 => Some(CommandCode::HeadsetMicVolume),
             0xA3 => Some(CommandCode::HeadsetAutoOff),
             0xB0 => Some(CommandCode::HeadsetStatus),
+            0xB7 => Some(CommandCode::HeadsetProBattery),
             0x2B => Some(CommandCode::MousePollRate),
             0x92 => Some(CommandCode::MouseBattery),
+            0x38 => Some(CommandCode::AnalogKeys),
+            0x41 => Some(CommandCode::Apex2023DirectClear),
+            0x1F => Some(CommandCode::Apex2023Oled),
             _ => None,
         }
     }
@@ -501,6 +530,63 @@ impl HidCommand for Apex8ZoneBrightnessCommand {
     }
 }
 
+/// [EXPERIMENTAL] Report-ID byte plus the 32 data bytes of an Apex 3 (`0x161A`) output report (GG `chunk HIDIO 33`).
+pub const APEX_3_REPORT_SIZE: usize = 33;
+
+/// [EXPERIMENTAL] Apex 3 (`0x161A`) lighting, 33-byte output reports, from GG's decrypted device spec (`apex_3`,
+/// 2026-10-25), never sent from `ssgg` on hardware. The spec's `save_to_flash` (`00 09 00`) is never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Apex3Command {
+    /// `00 0B 00 <R G B> x10` (GG `set_led_colors`): all ten zones.
+    Colors([Color; 10]),
+    /// `00 0A 00 <0..=100>` (GG `global_brightness`).
+    Brightness(u8),
+}
+
+impl HidCommand for Apex3Command {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::Apex3Lighting
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        check_report_buffer(buffer, APEX_3_REPORT_SIZE)?;
+        let report = &mut buffer[..APEX_3_REPORT_SIZE];
+        report.fill(0);
+        match self {
+            Self::Colors(colors) => {
+                report[1] = 0x0B;
+                for (slot, color) in report[3..].as_chunks_mut::<3>().0.iter_mut().zip(colors) {
+                    *slot = [color.r, color.g, color.b];
+                }
+            }
+            Self::Brightness(level) => {
+                report[1] = 0x0A;
+                report[3] = *level;
+            }
+        }
+        Ok(APEX_3_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Self::Brightness(level) = self
+            && *level > 100
+        {
+            return Err(Error::InvalidConfig(format!(
+                "Apex 3 brightness {level} out of range 0-100"
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::Colors(_) => "Apex 3 ten-zone colours".to_string(),
+            Self::Brightness(level) => format!("Apex 3 brightness {level}"),
+        }
+    }
+}
+
 /// [EXPERIMENTAL] Report-ID byte plus the 644 wire bytes of one profile chunk feature report.
 pub const PROFILE_CHUNK_REPORT_SIZE: usize = 645;
 
@@ -561,6 +647,310 @@ impl HidCommand for ProfileChunkCommand<'_> {
 
     fn description(&self) -> String {
         format!("Profile chunk: {} bytes at offset {}", self.data.len(), self.offset)
+    }
+}
+
+/// [EXPERIMENTAL] Analog layer an [`AnalogKeyCommand::HallThresholds`] frame sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HallLayer {
+    /// Primary actuation (GG `hall_thresholds`).
+    Primary = 0x00,
+    /// Second actuation point (GG `second_actuation_thresholds`).
+    Second = 0x02,
+}
+
+/// [EXPERIMENTAL] One rapid-tap key pair (GG `rapid_tap_pair`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RapidTapPair {
+    pub hid_1: u8,
+    pub hid_2: u8,
+    /// 0-3; what each value does is unknown.
+    pub mode: u8,
+    /// GG `report_both_keys`, sent as bit 7 of the mode byte.
+    pub report_both: bool,
+}
+
+/// [EXPERIMENTAL] Live analog-key settings of the 2022-firmware Apex boards (wired Apex Pro TKL 2023,
+/// `0x1628`): `00 38 <sub> ...`. Read from GG's decrypted device spec (`apex_pro_tkl_2022`, 2026-10-24),
+/// never sent from `ssgg` on hardware. Per-key frames carry every analog key: the count byte is a spec
+/// constant, so a frame cannot address one key alone. Whether a setting survives a power cycle is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalogKeyCommand<'a> {
+    /// `61 n layer {hid, h, l}*n`, a feature report. `h`/`l` are the raw hall pair of the profile tables.
+    HallThresholds { layer: HallLayer, keys: &'a [(u8, u8, u8)] },
+    /// `62 n {hid, mode}*n`, a feature report; mode is one of 0, 2, 3, 4.
+    ReleaseMode(&'a [(u8, u8)]),
+    /// `65 n {hid, sensitivity}*n`, a feature report; the unit of the sensitivity is unknown.
+    RapidTriggerSensitivity(&'a [(u8, u8)]),
+    /// `66 <0|1>`, an output report.
+    RapidTapEnable(bool),
+    /// `67 count {index, hid_1, hid_2, mode | 0x80 if report_both, 0, 0}*count`, an output report.
+    RapidTapPairs(&'a [RapidTapPair]),
+}
+
+impl AnalogKeyCommand<'_> {
+    /// Rapid-tap pairs the spec's `rapid_tap_pairs` struct holds.
+    pub const MAX_RAPID_TAP_PAIRS: usize = 10;
+    /// Release modes the spec's `single_key_release_mode` accepts.
+    pub const RELEASE_MODES: [u8; 4] = [0x00, 0x02, 0x03, 0x04];
+
+    fn sub_command(&self) -> u8 {
+        match self {
+            Self::HallThresholds { .. } => 0x61,
+            Self::ReleaseMode(_) => 0x62,
+            Self::RapidTriggerSensitivity(_) => 0x65,
+            Self::RapidTapEnable(_) => 0x66,
+            Self::RapidTapPairs(_) => 0x67,
+        }
+    }
+
+    /// Whether the frame is a feature report (`true`) or an output report.
+    pub fn is_feature(&self) -> bool {
+        matches!(
+            self,
+            Self::HallThresholds { .. } | Self::ReleaseMode(_) | Self::RapidTriggerSensitivity(_)
+        )
+    }
+
+    /// Bytes on the wire including the report-ID byte.
+    pub fn report_len(&self) -> usize {
+        if self.is_feature() {
+            PROFILE_CHUNK_REPORT_SIZE
+        } else {
+            KEYBOARD_REPORT_SIZE
+        }
+    }
+
+    fn body(&self) -> Vec<u8> {
+        match *self {
+            Self::HallThresholds { layer, keys } => {
+                let mut body = vec![keys.len() as u8, layer as u8];
+                body.extend(keys.iter().flat_map(|&(hid, h, l)| [hid, h, l]));
+                body
+            }
+            Self::ReleaseMode(keys) | Self::RapidTriggerSensitivity(keys) => {
+                let mut body = vec![keys.len() as u8];
+                body.extend(keys.iter().flat_map(|&(hid, value)| [hid, value]));
+                body
+            }
+            Self::RapidTapEnable(on) => vec![u8::from(on)],
+            Self::RapidTapPairs(pairs) => {
+                let mut body = vec![pairs.len() as u8];
+                for (index, pair) in pairs.iter().enumerate() {
+                    let mode = pair.mode | if pair.report_both { 0x80 } else { 0x00 };
+                    body.extend([index as u8, pair.hid_1, pair.hid_2, mode, 0, 0]);
+                }
+                body
+            }
+        }
+    }
+
+    fn keys(&self) -> Vec<u8> {
+        match *self {
+            Self::HallThresholds { keys, .. } => keys.iter().map(|k| k.0).collect(),
+            Self::ReleaseMode(keys) | Self::RapidTriggerSensitivity(keys) => keys.iter().map(|k| k.0).collect(),
+            Self::RapidTapEnable(_) | Self::RapidTapPairs(_) => Vec::new(),
+        }
+    }
+}
+
+impl HidCommand for AnalogKeyCommand<'_> {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::AnalogKeys
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        let len = self.report_len();
+        check_report_buffer(buffer, len)?;
+        let report = &mut buffer[..len];
+        report.fill(0);
+        report[1] = CommandCode::AnalogKeys as u8;
+        report[2] = self.sub_command();
+        let body = self.body();
+        report[3..3 + body.len()].copy_from_slice(&body);
+        Ok(len)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let keys = self.keys();
+        let per_key = !matches!(self, Self::RapidTapEnable(_) | Self::RapidTapPairs(_));
+        if per_key && keys.is_empty() {
+            return Err(Error::InvalidConfig(
+                "an analog-key frame needs at least one key".to_string(),
+            ));
+        }
+        let mut seen = [false; 256];
+        for &hid in &keys {
+            if hid == 0 || std::mem::replace(&mut seen[usize::from(hid)], true) {
+                return Err(Error::InvalidConfig(format!(
+                    "HID usage {hid:#04x} is zero or listed twice"
+                )));
+            }
+        }
+        if let Self::ReleaseMode(keys) = self
+            && let Some((hid, mode)) = keys.iter().find(|(_, m)| !Self::RELEASE_MODES.contains(m))
+        {
+            return Err(Error::InvalidConfig(format!(
+                "release mode {mode} for {hid:#04x} is not one of 0, 2, 3, 4"
+            )));
+        }
+        if let Self::RapidTapPairs(pairs) = self {
+            if pairs.len() > Self::MAX_RAPID_TAP_PAIRS {
+                return Err(Error::InvalidConfig(format!(
+                    "{} rapid-tap pairs given, at most {} fit",
+                    pairs.len(),
+                    Self::MAX_RAPID_TAP_PAIRS
+                )));
+            }
+            if let Some(pair) = pairs
+                .iter()
+                .find(|p| p.mode > 3 || p.hid_1 == 0 || p.hid_2 == 0 || p.hid_1 == p.hid_2)
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "rapid-tap pair {:#04x}/{:#04x} mode {}: needs two different keys and mode 0-3",
+                    pair.hid_1, pair.hid_2, pair.mode
+                )));
+            }
+        }
+        if 3 + self.body().len() > self.report_len() || keys.len() > usize::from(u8::MAX) {
+            return Err(Error::InvalidConfig(format!(
+                "{} keys do not fit one {}-byte report",
+                keys.len(),
+                self.report_len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::HallThresholds { layer, keys } => format!("Hall thresholds ({layer:?} layer), {} keys", keys.len()),
+            Self::ReleaseMode(keys) => format!("Release mode, {} keys", keys.len()),
+            Self::RapidTriggerSensitivity(keys) => format!("Rapid trigger sensitivity, {} keys", keys.len()),
+            Self::RapidTapEnable(on) => format!("Rapid tap {}", if *on { "on" } else { "off" }),
+            Self::RapidTapPairs(pairs) => format!("Rapid tap pairs, {} pairs", pairs.len()),
+        }
+    }
+}
+
+/// [EXPERIMENTAL] One chunk of the 2022-firmware on-board profile **read** (GG `flashfs-read-payload`):
+/// `00 | 83 01 | fs id | size u16 LE | offset u32 LE | zero padding` in a 645-byte feature report, answered
+/// by a feature-report read whose data starts behind a 3-byte header. File id of profile slot N is `0x80 + N`.
+/// Read only. Spec-derived (`base_apex_2022_wired` `read_onboard_profile_N`, 2026-10-24); the byte order
+/// matches GG's captured `03 01 80` write chunks of the same family. Never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gen3ProfileReadCommand {
+    pub fs_id: u8,
+    pub size: u16,
+    pub offset: u32,
+}
+
+impl Gen3ProfileReadCommand {
+    /// Bytes GG asks for per chunk (`onboard-profile-chunk-size`).
+    pub const CHUNK_LEN: u16 = 500;
+    /// File id of profile slot 0 (`config-fs-profile-1`).
+    pub const FIRST_PROFILE_FS: u8 = 0x80;
+    /// Profile slots the spec's `read_onboard_profile_0..4` cover.
+    pub const SLOTS: u8 = 5;
+    /// Reply bytes in front of the data (GG's chunk specifier `(3 500 0)`); their meaning is unknown.
+    pub const REPLY_HEADER_LEN: usize = 3;
+    /// Pause GG sets between commands of an on-board read (`time-between-commands-onboard-override`).
+    pub const COMMAND_GAP_MS: u64 = 13;
+}
+
+impl HidCommand for Gen3ProfileReadCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::Gen3ProfileRead
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        self.validate()?;
+        check_report_buffer(buffer, PROFILE_CHUNK_REPORT_SIZE)?;
+        let report = &mut buffer[..PROFILE_CHUNK_REPORT_SIZE];
+        report.fill(0);
+        report[1..4].copy_from_slice(&[CommandCode::OnboardBufferRead as u8, 0x01, self.fs_id]);
+        report[4..6].copy_from_slice(&self.size.to_le_bytes());
+        report[6..10].copy_from_slice(&self.offset.to_le_bytes());
+        Ok(PROFILE_CHUNK_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let max = PROFILE_CHUNK_REPORT_SIZE - 1 - Self::REPLY_HEADER_LEN;
+        if self.size == 0 || usize::from(self.size) > max {
+            return Err(Error::InvalidConfig(format!(
+                "profile read of {} bytes: a reply carries 1-{max}",
+                self.size
+            )));
+        }
+        if !(Self::FIRST_PROFILE_FS..Self::FIRST_PROFILE_FS + Self::SLOTS).contains(&self.fs_id) {
+            return Err(Error::InvalidConfig(format!(
+                "file id {:#04x} is not a profile slot (0x80-0x84)",
+                self.fs_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Gen3 profile read: file {:#04x} offset {} size {}",
+            self.fs_id, self.offset, self.size
+        )
+    }
+}
+
+/// [EXPERIMENTAL] Display commands of the 2022-firmware Apex boards, from GG's decrypted device spec
+/// (`base_apex_2022_wired`, `apex_pro_tkl_2022`, 2026-10-24); never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Apex2022DisplayCommand<'a> {
+    /// `00 41`, output report (GG `clear_direct_write`): leave direct-mode lighting.
+    ClearDirect,
+    /// `00 1F 81 <640 bytes>`, feature report (GG `oled_direct_write`). The pixel packing is not in the spec.
+    Oled(&'a [u8; 640]),
+    /// `00 1F 82`, output report (GG `oled_reset_direct_write`): hand the OLED back to the firmware.
+    OledReset,
+}
+
+impl HidCommand for Apex2022DisplayCommand<'_> {
+    fn command_code(&self) -> CommandCode {
+        match self {
+            Self::ClearDirect => CommandCode::Apex2023DirectClear,
+            Self::Oled(_) | Self::OledReset => CommandCode::Apex2023Oled,
+        }
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        let len = match self {
+            Self::Oled(_) => PROFILE_CHUNK_REPORT_SIZE,
+            Self::ClearDirect | Self::OledReset => KEYBOARD_REPORT_SIZE,
+        };
+        check_report_buffer(buffer, len)?;
+        let report = &mut buffer[..len];
+        report.fill(0);
+        report[1] = self.command_code() as u8;
+        match self {
+            Self::ClearDirect => {}
+            Self::Oled(bitmap) => {
+                report[2] = 0x81;
+                report[3..3 + bitmap.len()].copy_from_slice(&bitmap[..]);
+            }
+            Self::OledReset => report[2] = 0x82,
+        }
+        Ok(len)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::ClearDirect => "Leave direct-mode lighting".to_string(),
+            Self::Oled(_) => "OLED direct write, 640 bytes".to_string(),
+            Self::OledReset => "OLED reset to firmware".to_string(),
+        }
     }
 }
 
@@ -1376,13 +1766,16 @@ impl HidCommand for OnboardFileCommitCommand {
     }
 }
 
-/// [EXPERIMENTAL] One-byte setting of the Arctis Nova 7 family: `00 <opcode> <value>` zero padded to
-/// [`HEADSET_REPORT_SIZE`], byte 0 being the hidapi report number. `code` selects the setting and fixes the
-/// accepted range of `value`: sidetone `0..=3`, microphone volume `0..=7`, auto-off any minute count.
-/// Source: community forks, never sent from `ssgg` on hardware. Never followed by the save frame `00 09`,
-/// which would persist the setting on the headset.
+/// [EXPERIMENTAL] One-byte headset setting: `<report id> <opcode> <value>` zero padded to
+/// [`HEADSET_REPORT_SIZE`], byte 0 being the hidapi report number (`00` on the Nova 4/5/7 and Arctis 7+
+/// families, `06` on the Nova Pro family). `code` selects the setting; `value` is bounded by the widest range
+/// any model accepts, the per-model range lives in `headsets::nova7::Nova7Model`. Source: community forks and
+/// GG's decrypted device specs, never sent from `ssgg` on hardware. Never followed by the save frame
+/// `<id> 09`, which would persist the setting on the headset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeadsetSettingCommand {
+    /// Report number in byte 0: `0x00`, or `0x06` on the Nova Pro family.
+    pub report_id: u8,
     /// [`CommandCode::HeadsetSidetone`], [`CommandCode::HeadsetMicVolume`] or [`CommandCode::HeadsetAutoOff`].
     pub code: CommandCode,
     /// Wire value in the range `code` allows.
@@ -1390,10 +1783,11 @@ pub struct HeadsetSettingCommand {
 }
 
 impl HeadsetSettingCommand {
-    /// Highest wire sidetone level.
-    pub const MAX_SIDETONE: u8 = 3;
-    /// Highest wire microphone volume.
-    pub const MAX_MIC_VOLUME: u8 = 7;
+    /// Highest wire sidetone level of any model using these frames (Nova 5 family `0..=10`; Nova 7 `0..=3`).
+    /// The per-model range lives in `headsets::nova7::Nova7Model`.
+    pub const MAX_SIDETONE: u8 = 10;
+    /// Highest wire microphone volume of any model using these frames (Nova 5 family `0..=15`; Nova 7 `0..=7`).
+    pub const MAX_MIC_VOLUME: u8 = 15;
 }
 
 impl HidCommand for HeadsetSettingCommand {
@@ -1406,6 +1800,7 @@ impl HidCommand for HeadsetSettingCommand {
         check_report_buffer(buffer, HEADSET_REPORT_SIZE)?;
         let report = &mut buffer[..HEADSET_REPORT_SIZE];
         report.fill(0);
+        report[0] = self.report_id;
         report[1] = self.code as u8;
         report[2] = self.value;
         Ok(HEADSET_REPORT_SIZE)
@@ -1461,6 +1856,39 @@ impl HidCommand for HeadsetStatusQueryCommand {
 
     fn description(&self) -> String {
         "Headset status query".to_string()
+    }
+}
+
+/// [EXPERIMENTAL] Nova Pro Wireless family battery query: `06 b7` zero padded to [`HEADSET_REPORT_SIZE`],
+/// answered by `[06] b7 <headset 0..=8> <charger 0..=8> <charging 1|2|4|8>` (GG spec
+/// `base_arctis_nova_pro_wireless` `battery_status`, 2026-10-25; the meaning of the charging values is not
+/// in the spec). Never sent from `ssgg` on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadsetBatteryQueryCommand {
+    /// Report number in byte 0 (`0x06` on the Nova Pro family).
+    pub report_id: u8,
+}
+
+impl HidCommand for HeadsetBatteryQueryCommand {
+    fn command_code(&self) -> CommandCode {
+        CommandCode::HeadsetProBattery
+    }
+
+    fn serialize(&self, buffer: &mut [u8], _device_type: HidDeviceType) -> Result<usize> {
+        check_report_buffer(buffer, HEADSET_REPORT_SIZE)?;
+        let report = &mut buffer[..HEADSET_REPORT_SIZE];
+        report.fill(0);
+        report[0] = self.report_id;
+        report[1] = CommandCode::HeadsetProBattery as u8;
+        Ok(HEADSET_REPORT_SIZE)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        "Headset battery query".to_string()
     }
 }
 
@@ -3738,28 +4166,49 @@ mod tests {
             (CommandCode::HeadsetSidetone, 0, 0x39),
             (CommandCode::HeadsetSidetone, 3, 0x39),
             (CommandCode::HeadsetMicVolume, 7, 0x37),
+            (CommandCode::HeadsetSidetone, 10, 0x39),
+            (CommandCode::HeadsetMicVolume, 15, 0x37),
             (CommandCode::HeadsetAutoOff, 0, 0xA3),
             (CommandCode::HeadsetAutoOff, 255, 0xA3),
         ] {
-            let report = headset_report(&HeadsetSettingCommand { code, value });
+            let report = headset_report(&HeadsetSettingCommand {
+                report_id: 0,
+                code,
+                value,
+            });
             assert_eq!(&report[..3], &[0x00, opcode, value]);
             assert!(report[3..].iter().all(|&b| b == 0));
         }
+        // Nova Pro family: GG spec `base_arctis_nova_pro_wireless` sidetone `(tx_report_id) 39 level`, id 6.
+        let pro = headset_report(&HeadsetSettingCommand {
+            report_id: 0x06,
+            code: CommandCode::HeadsetSidetone,
+            value: 2,
+        });
+        assert_eq!(&pro[..3], &[0x06, 0x39, 0x02]);
+        let battery = headset_report(&HeadsetBatteryQueryCommand { report_id: 0x06 });
+        assert_eq!(&battery[..2], &[0x06, 0xB7]);
+        assert!(battery[2..].iter().all(|&b| b == 0));
     }
 
     #[test]
     fn headset_setting_rejects_out_of_range_and_foreign_codes() {
         let mut buffer = [0u8; HEADSET_REPORT_SIZE];
         for (code, value) in [
-            (CommandCode::HeadsetSidetone, 4),
-            (CommandCode::HeadsetMicVolume, 8),
+            (CommandCode::HeadsetSidetone, 11),
+            (CommandCode::HeadsetMicVolume, 16),
             (CommandCode::Apply, 0),
             (CommandCode::HeadsetStatus, 0),
         ] {
-            let command = HeadsetSettingCommand { code, value };
+            let command = HeadsetSettingCommand {
+                report_id: 0,
+                code,
+                value,
+            };
             assert!(command.serialize(&mut buffer, HidDeviceType::Headset).is_err());
         }
         let valid = HeadsetSettingCommand {
+            report_id: 0,
             code: CommandCode::HeadsetSidetone,
             value: 1,
         };
@@ -3887,5 +4336,176 @@ mod tests {
         };
         assert!(last_zone.serialize(&mut buffer[..20], HidDeviceType::Mouse).is_err());
         assert!(last_zone.serialize(&mut buffer, HidDeviceType::Mouse).is_ok());
+    }
+
+    fn keyboard_report(command: impl HidCommand) -> Vec<u8> {
+        let mut buffer = vec![0xAAu8; PROFILE_CHUNK_REPORT_SIZE];
+        let size = HidReportBuilder::new(HidDeviceType::Keyboard)
+            .build_report(command, &mut buffer)
+            .unwrap();
+        buffer.truncate(size);
+        buffer
+    }
+
+    // Vectors from the `apex_pro_tkl_2022` spec structs: `00 38 <sub>` then the fields in order.
+    #[test]
+    fn analog_key_frames_follow_the_spec_layout() {
+        let hall = keyboard_report(AnalogKeyCommand::HallThresholds {
+            layer: HallLayer::Second,
+            keys: &[(0x04, 47, 42), (0x1A, 5, 5)],
+        });
+        assert_eq!(hall.len(), 645);
+        assert_eq!(&hall[..11], &[0x00, 0x38, 0x61, 2, 0x02, 0x04, 47, 42, 0x1A, 5, 5]);
+        assert!(hall[11..].iter().all(|&b| b == 0));
+
+        let release = keyboard_report(AnalogKeyCommand::ReleaseMode(&[(0x04, 2)]));
+        assert_eq!(release.len(), 645);
+        assert_eq!(&release[..6], &[0x00, 0x38, 0x62, 1, 0x04, 2]);
+        assert!(release[6..].iter().all(|&b| b == 0));
+
+        let rt = keyboard_report(AnalogKeyCommand::RapidTriggerSensitivity(&[(0x2C, 9)]));
+        assert_eq!(&rt[..6], &[0x00, 0x38, 0x65, 1, 0x2C, 9]);
+
+        let enable = keyboard_report(AnalogKeyCommand::RapidTapEnable(true));
+        assert_eq!(enable.len(), 65);
+        assert_eq!(&enable[..4], &[0x00, 0x38, 0x66, 1]);
+        assert!(enable[4..].iter().all(|&b| b == 0));
+
+        let pairs = keyboard_report(AnalogKeyCommand::RapidTapPairs(&[
+            RapidTapPair {
+                hid_1: 0x04,
+                hid_2: 0x07,
+                mode: 3,
+                report_both: true,
+            },
+            RapidTapPair {
+                hid_1: 0x1A,
+                hid_2: 0x16,
+                mode: 0,
+                report_both: false,
+            },
+        ]));
+        assert_eq!(pairs.len(), 65);
+        assert_eq!(
+            &pairs[..16],
+            &[
+                0x00, 0x38, 0x67, 2, 0, 0x04, 0x07, 0x83, 0, 0, 1, 0x1A, 0x16, 0x00, 0, 0
+            ]
+        );
+        assert!(pairs[16..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn analog_key_frames_reject_bad_input() {
+        let builder = HidReportBuilder::new(HidDeviceType::Keyboard);
+        let mut buffer = vec![0u8; PROFILE_CHUNK_REPORT_SIZE];
+        let pair = |mode| RapidTapPair {
+            hid_1: 4,
+            hid_2: 7,
+            mode,
+            report_both: false,
+        };
+        let eleven = [pair(0); 11];
+        for bad in [
+            AnalogKeyCommand::ReleaseMode(&[(0x04, 1)]),
+            AnalogKeyCommand::ReleaseMode(&[]),
+            AnalogKeyCommand::RapidTriggerSensitivity(&[(0x04, 1), (0x04, 2)]),
+            AnalogKeyCommand::RapidTriggerSensitivity(&[(0x00, 1)]),
+            AnalogKeyCommand::RapidTapPairs(&eleven),
+            AnalogKeyCommand::RapidTapPairs(&[pair(4)]),
+        ] {
+            assert!(builder.build_report(bad, &mut buffer).is_err(), "{bad:?}");
+        }
+        let too_many: Vec<(u8, u8, u8)> = (1..=214).map(|hid| (hid as u8, 0, 0)).collect();
+        assert!(
+            builder
+                .build_report(
+                    AnalogKeyCommand::HallThresholds {
+                        layer: HallLayer::Primary,
+                        keys: &too_many
+                    },
+                    &mut buffer
+                )
+                .is_err(),
+            "5 + 3 * 214 bytes overflow 645"
+        );
+        assert!(
+            builder
+                .build_report(AnalogKeyCommand::RapidTapPairs(&[pair(0); 10]), &mut buffer)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn gen3_profile_read_header_is_little_endian() {
+        let read = keyboard_report(Gen3ProfileReadCommand {
+            fs_id: 0x82,
+            size: 500,
+            offset: 0x0001_2EE0,
+        });
+        assert_eq!(read.len(), 645);
+        assert_eq!(
+            &read[..10],
+            &[0x00, 0x83, 0x01, 0x82, 0xF4, 0x01, 0xE0, 0x2E, 0x01, 0x00]
+        );
+        assert!(read[10..].iter().all(|&b| b == 0));
+
+        let mut buffer = vec![0u8; PROFILE_CHUNK_REPORT_SIZE];
+        let builder = HidReportBuilder::new(HidDeviceType::Keyboard);
+        for (fs_id, size) in [(0x7F, 500), (0x85, 500), (0x80, 0), (0x80, 642)] {
+            let bad = Gen3ProfileReadCommand { fs_id, size, offset: 0 };
+            assert!(builder.build_report(bad, &mut buffer).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn display_frames_follow_the_spec_layout() {
+        assert_eq!(
+            &keyboard_report(Apex2022DisplayCommand::ClearDirect)[..3],
+            &[0x00, 0x41, 0x00]
+        );
+        let reset = keyboard_report(Apex2022DisplayCommand::OledReset);
+        assert_eq!((reset.len(), &reset[..3]), (65, &[0x00, 0x1F, 0x82][..]));
+        let mut bitmap = [0u8; 640];
+        bitmap[0] = 0xAB;
+        bitmap[639] = 0xCD;
+        let oled = keyboard_report(Apex2022DisplayCommand::Oled(&bitmap));
+        assert_eq!(oled.len(), 645);
+        assert_eq!(&oled[..4], &[0x00, 0x1F, 0x81, 0xAB]);
+        assert_eq!(oled[642], 0xCD);
+        assert!(oled[643..].iter().all(|&b| b == 0));
+    }
+
+    // Vectors from GG's `apex_3` spec: `set_led_colors` and `global_brightness`, 33-byte output reports.
+    #[test]
+    fn apex_3_frames_follow_the_spec_layout() {
+        let mut colors = [Color::BLACK; 10];
+        colors[0] = Color::new(1, 2, 3);
+        colors[9] = Color::new(0xAA, 0xBB, 0xCC);
+        let frame = keyboard_report(Apex3Command::Colors(colors));
+        assert_eq!(frame.len(), 33);
+        assert_eq!(&frame[..6], &[0x00, 0x0B, 0x00, 1, 2, 3]);
+        assert_eq!(&frame[30..], &[0xAA, 0xBB, 0xCC]);
+        let bright = keyboard_report(Apex3Command::Brightness(100));
+        assert_eq!(&bright[..4], &[0x00, 0x0A, 0x00, 100]);
+        assert!(bright[4..].iter().all(|&b| b == 0));
+        let mut buffer = [0u8; APEX_3_REPORT_SIZE];
+        assert!(
+            Apex3Command::Brightness(101)
+                .serialize(&mut buffer, HidDeviceType::Keyboard)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn new_wire_codes_round_trip_and_the_tag_does_not() {
+        for code in [
+            CommandCode::AnalogKeys,
+            CommandCode::Apex2023DirectClear,
+            CommandCode::Apex2023Oled,
+        ] {
+            assert_eq!(CommandCode::from_report_byte(code as u8), Some(code));
+        }
+        assert_eq!(CommandCode::from_report_byte(0xF4), None);
     }
 }

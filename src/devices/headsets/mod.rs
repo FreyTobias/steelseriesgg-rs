@@ -64,11 +64,8 @@ pub enum EqPreset {
     Custom,
 }
 
-/// Generic SteelSeries headset implementation.
-///
-/// [EXPERIMENTAL] Every `06 xx` command below (`06 18` battery, `06 45` ChatMix, `06 35` sidetone, `06 37`
-/// mic volume, `06 39` mic mute, `06 33` EQ, `06 31` auto-off) is unconfirmed: it has not been tested on
-/// hardware and no capture backs it.
+/// A headset ssgg detects but knows no protocol for: it can be listed and raw-accessed, and every
+/// [`Headset`] command answers unsupported. Families with a protocol live in [`nova7`].
 pub struct GenericHeadset {
     info: DeviceInfo,
     device: Option<Arc<Mutex<HidDevice>>>,
@@ -139,72 +136,44 @@ impl Device for GenericHeadset {
     }
 }
 
+impl GenericHeadset {
+    fn no_protocol(&self, what: &str) -> Error {
+        Error::DeviceCommunication(format!(
+            "{what} is not supported on {} ({:04X}): ssgg knows no protocol for this headset",
+            self.info.name, self.info.product_id
+        ))
+    }
+}
+
+/// Every command answers unsupported. The `06 xx` guesses this type used to send were removed on 2026-10-25:
+/// GG's decrypted device specs show other frames for every model that has these settings (on the Arctis 7,
+/// `06 33` is microphone volume, not the EQ preset that was sent), so a guess could change the wrong setting.
 impl Headset for GenericHeadset {
     fn battery_level(&mut self) -> Result<Option<u8>> {
-        // Request battery status
-        self.send_report(&[0x06, 0x18])?;
-
-        let mut buf = [0u8; 64];
-        let len = self.receive_report(&mut buf)?;
-
-        if len >= 3 && buf[0] == 0x06 {
-            // Battery level is typically in buf[2]
-            let level = buf[2].min(100);
-            Ok(Some(level))
-        } else {
-            Ok(None)
-        }
+        Err(self.no_protocol("Battery level"))
     }
 
-    fn set_sidetone(&mut self, level: u8) -> Result<()> {
-        let level = level.min(100);
-        let data = [0x06, 0x35, level];
-        self.send_report(&data)
+    fn set_sidetone(&mut self, _level: u8) -> Result<()> {
+        Err(self.no_protocol("Sidetone"))
     }
 
-    fn set_mic_volume(&mut self, volume: u8) -> Result<()> {
-        let volume = volume.min(100);
-        let data = [0x06, 0x37, volume];
-        self.send_report(&data)
+    fn set_mic_volume(&mut self, _volume: u8) -> Result<()> {
+        Err(self.no_protocol("Microphone volume"))
     }
 
-    fn set_mic_mute(&mut self, muted: bool) -> Result<()> {
-        let data = [0x06, 0x39, if muted { 0x01 } else { 0x00 }];
-        self.send_report(&data)
+    fn set_mic_mute(&mut self, _muted: bool) -> Result<()> {
+        Err(self.no_protocol("Microphone mute"))
     }
 
-    fn set_eq_preset(&mut self, preset: EqPreset) -> Result<()> {
-        let preset_code = match preset {
-            EqPreset::Flat => 0x00,
-            EqPreset::Bass => 0x01,
-            EqPreset::Focus => 0x02,
-            EqPreset::Smiley => 0x03,
-            EqPreset::Custom => 0x04,
-        };
-
-        let data = [0x06, 0x33, preset_code];
-        self.send_report(&data)
+    fn set_eq_preset(&mut self, _preset: EqPreset) -> Result<()> {
+        Err(self.no_protocol("EQ presets"))
     }
 
     fn chat_mix(&mut self) -> Result<f32> {
-        // Request ChatMix status
-        self.send_report(&[0x06, 0x45])?;
-
-        let mut buf = [0u8; 64];
-        let len = self.receive_report(&mut buf)?;
-
-        if len >= 3 && buf[0] == 0x06 {
-            // ChatMix value: 0 = full game, 128 = balanced, 255 = full chat
-            let raw = buf[2] as f32;
-            let normalized = (raw - 128.0) / 128.0;
-            Ok(normalized.clamp(-1.0, 1.0))
-        } else {
-            Ok(0.0) // Default to balanced
-        }
+        Err(self.no_protocol("ChatMix"))
     }
 
-    fn set_auto_off(&mut self, minutes: u8) -> Result<()> {
-        let data = [0x06, 0x31, minutes];
-        self.send_report(&data)
+    fn set_auto_off(&mut self, _minutes: u8) -> Result<()> {
+        Err(self.no_protocol("Auto-off"))
     }
 }

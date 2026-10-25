@@ -63,7 +63,10 @@ Lighting is the only part replayed from `ssgg` so far (one solid red, 2026-10-14
    `impl_keyboard_with_delegation!` generates them, so overriding needs a macro split. Daemon animation on these
    models still collapses to the first zone colour (`set_zone_colors`); a per-key wave needs a key-position table
    the repo does not have.
-2. **Extra output report before each frame.** The existing `initialize()` path sends `00 09 00 ..` as an output report
+2. **Resolved 2026-10-25 (software):** `initialize()` sent `00 09` through the keyboard path that shifted every
+   frame by one byte (handoff R1), so the board only ever received an unknown `00 09 ..` command. The shift is
+   fixed and APPLY is no longer sent at all (direct models, and `GenericKeyboard`, where several specs call it
+   `save_to_flash`). Old note: **Extra output report before each frame.** The existing `initialize()` path sends `00 09 00 ..` as an output report
    before frames. Code comments say `0x09` makes the controller fall back to its stored profile. Check (by USBPcap
    during step 1) whether `0x1628` still sends it; if yes, test with it skipped for `0x1628` and keep whichever
    variant gives a stable frame. Code still sends it from `initialize()` for `0x1628` and `0x1642` (left alone on
@@ -85,6 +88,18 @@ there is nothing on the wire to read on this firmware. Writing the profile stays
 command for the same reason: the checksum is solved, but there is no way to get a current blob to modify, and
 none is expected to turn up without new firmware.
 
+0. **Correction 2026-10-24 (spec-derived, `[EXPERIMENTAL]`, not run on hardware):** GG's decrypted device spec for
+   this family (`base_apex_2022_wired`, `apex_pro_tkl_2022`) defines live feature reports `00 38 61/62/65/66/67`
+   for actuation, release mode, rapid trigger and rapid tap, plus a chunked on-board profile read
+   (`00 83 01 <fs-id> <size> <offset>`, fs-id `0x80 + slot`). The "no read-back, `0x2D` only" reading below came from
+   a one-minute live trace and is therefore not conclusive. The items below stay valid as history until a
+   hardware test settles it.
+   **Implemented 2026-10-25, owed hardware tests H1/H2 in `handoff.md`:** `ssgg actuation set|set-value|clear-second|
+   release-mode|rapid-trigger|rapid-tap|rapid-tap-pairs` send the `38 6x` frames on `0x1628` (every analog key;
+   `--dry-run` prints the bytes; only the four captured distances are accepted), and `ssgg onboard gen3-read`
+   reads one slot read-only and checks the CRC at 12320. The spec also names three of the init frames in item 3:
+   `b2` is `load_profile`, `34` is `set_profile_volatile`, `38 66`/`38 67` are rapid tap enable/pairs. The spec's
+   `device-key-idx-to-hid` matches `WIRED_2023_PROFILE_SLOTS` slot for slot.
 1. **Done 2026-10-15, still blocked:** `keyboards/apex_pro_tkl_2023_profile.rs` has the checksum, `set_actuation`
    (rejects unknown mm values and keys without a slot) and the 25-chunk split, all unit-tested. Not wired to any
    command: no read-back exists (confirmed 2026-10-21, not just undiscovered), so there is no current blob to
@@ -100,7 +115,9 @@ none is expected to turn up without new firmware.
 
 ## P3. Apex 3 TKL (`0x1622`) RGB not applied (issues #173, #257)
 
-The code already sends `0x21` with selector `0xFF` and `R G B` per zone (OpenRGB 8-zone layout). Changed on the
+The code already sends `0x21` with selector `0xFF` and `R G B` per zone (OpenRGB 8-zone layout). **2026-10-25:** GG's decrypted spec (`apex_3_tkl`) confirms the frames ssgg sends (`00 21 FF <RGB x8>`,
+brightness `00 23 <0..=16>`), and the likely cause of #173/#257 was found: until 2026-10-25 every keyboard output
+report went out shifted (`00 00 21 ...`, handoff R1). Fixed; needs the outside test below. Changed on the
 branch (untested): `Apex3Tkl` no longer sends the APPLY `0x09` from `initialize()`/`apply()`, which OpenRGB's
 8-zone controller never sends (checked against its source 2026-10-21) and which our own notes say reverts direct
 lighting on other models. Open differences:
@@ -167,9 +184,12 @@ Still open:
 - Other mice families (Prime/Prime+, Old, Rival 3, 310/TEN, wireless-old) and the rest of Sarhan's mouse table.
 - Other headset families from Sarhan's `models.rs` (Arctis 1/7/9, Pro Wireless, Nova Pro Wireless, 7+, Nova 3/5):
   its `with_save` appends the save sequence to every write; strip that before using the data.
-- Firmware probe: OpenRGB says Apex Pro TKL / Apex 9 switch to the Gen 3 protocol from firmware 1.19.7; ssgg does
-  not probe firmware to choose the packet.
-- Apex 3 (`0x161A`, tri-zone) and Old Apex (`0x1202`, `0x1206`) layouts exist in Sarhan's `protocol.rs`; not taken.
+- ~~Firmware probe~~ done 2026-10-25: `ApexProTkl2023` polls `90 00` once on `0x1614`/`0x1634`/`0x1620` and uses the
+  Gen 3 init (and `0x40` on `0x1614`) from 1.19.7, as OpenRGB's `SendInitialization` does. Untested.
+- ~~Apex 3 (`0x161A`)~~ done 2026-10-25 from GG's spec (10 zones, not tri-zone): class `Apex3`. Old Apex (`0x1202`,
+  `0x1206`) read from the spec but not taken: GG switches it into driver mode around lighting (handoff R2).
+- Other headset families: 2026-10-25 the Arctis 7+, Nova 4, Nova 5 / Nova 3 Wireless and Nova Pro families were
+  added from GG's specs (`headsets::nova7`); `GenericHeadset` stopped sending its guessed `06 xx` bytes.
 - Nova 7 Gen 2 (`0x227e`) Save `0x09` (Jaime `nova7_gen2.rs`): Save persists to the headset; not taken.
 - Remapper gaps: no hot-plug (an unplugged keyboard ends the session), no LED capability on the virtual device.
 - Desktop window: `ssgg-gui` (feature `desktop`, wry + tao) wraps the `ssgg gui` editor. Built and started on Windows

@@ -55,3 +55,4 @@ apexctl/
 
 # preview.mjs output (tools/profile-gui)
 tools/profile-gui/board-preview.svg
+handoff.md

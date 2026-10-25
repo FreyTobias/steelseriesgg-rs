@@ -194,8 +194,15 @@ Over about one minute, including the owner opening the keyboard's actuation sett
    colours and Linux hidraw were still not tested. The 0x4B init is skipped for this model and was not
    needed in either test.
 4. The init sequence at GG startup (needs a capture that begins before GG launches).
-5. What `38 66` toggles globally and what `38 67` configures.
-6. ~~Whether an actuation/profile read-back command exists.~~ No. Live HID trace, 2026-10-21 (see "Live HID
+5. ~~What `38 66` toggles globally and what `38 67` configures.~~ Per GG's decrypted device spec
+   (`apex_pro_tkl_2022`, 2026-10-24): `38 66 <0|1>` is `rapid_tap_enable`, `38 67` is `rapid_tap_pairs`
+   (`count {index, hid_1, hid_2, mode | 0x80 report-both, 0, 0}`). Spec-derived, not confirmed on hardware;
+   `ssgg actuation rapid-tap` / `rapid-tap-pairs` send them.
+6. Whether an actuation/profile read-back command exists. **Reopened 2026-10-24:** GG's decrypted device spec
+   (`base_apex_2022_wired` `read_onboard_profile_N`, `apex_pro_tkl_2022` `hall_thresholds`) defines both a chunked
+   profile read (`00 83 01 <fs-id> <size> <offset>`) and live actuation writes (`00 38 61 ...`). Spec-derived,
+   untested on hardware; the trace below only shows GG did not use them during that minute. Original note:
+   ~~No.~~ Live HID trace, 2026-10-21 (see "Live HID
    trace and engine memory read"): zero `GET_FEATURE` transfers over ~1 minute including the owner viewing
    GG's actuation page; GG's UI reads only its own cached config. Explains `ssgg actuation` having no effect
    on `0x1628` (confirmed by the owner, 2026-10-21): there is no wire command to send.

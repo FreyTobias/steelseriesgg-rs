@@ -9,12 +9,12 @@ mod daemon;
 use clap::Parser;
 
 use crate::cli::{
-    ActuationAction, Cli, Commands, HeadsetAction, MouseAction, PerKeyAction, PollrateAction, ProfileAction,
-    RemapAction, RgbAction, parse_key_name, require_color,
+    Cli, Commands, HeadsetAction, MouseAction, PerKeyAction, PollrateAction, ProfileAction, RemapAction, RgbAction,
+    parse_key_name, require_color,
 };
 use crate::commands::{
-    cmd_bug_report, cmd_gui, cmd_hid_logs, cmd_onboard, cmd_performance, cmd_status, cmd_test_device, cmd_validate,
-    cmd_verify_performance,
+    cmd_actuation, cmd_bug_report, cmd_gui, cmd_hid_logs, cmd_oled, cmd_onboard, cmd_performance, cmd_status,
+    cmd_test_device, cmd_validate, cmd_verify_performance,
 };
 use crate::daemon::{cmd_daemon, cmd_server};
 use tracing::{Level, info};
@@ -83,6 +83,11 @@ async fn main() -> Result<()> {
         Commands::Actuation { action } => {
             let manager = new_device_manager()?;
             cmd_actuation(&manager, action).await?;
+        }
+
+        Commands::Oled { action } => {
+            let manager = new_device_manager()?;
+            cmd_oled(&manager, action).await?;
         }
 
         Commands::Headset { action } => {
@@ -356,6 +361,11 @@ async fn cmd_rgb(manager: &DeviceManager, action: RgbAction) -> Result<()> {
         RgbAction::Perkey { action } => {
             cmd_per_key_rgb(&mut keyboard, action).await?;
         }
+
+        RgbAction::Release => {
+            keyboard.send_display_command(steelseries_gg::devices::hid_reports::Apex2022DisplayCommand::ClearDirect)?;
+            println!("Sent the leave-direct-mode report [EXPERIMENTAL, never confirmed on hardware]");
+        }
     }
 
     Ok(())
@@ -523,55 +533,6 @@ async fn run_remap(bindings: steelseries_gg::input::BindingSet, product_id: Opti
 
     stop.store(true, Ordering::SeqCst);
     worker.await.map_err(|e| Error::Other(e.to_string()))?
-}
-
-async fn cmd_actuation(manager: &DeviceManager, action: ActuationAction) -> Result<()> {
-    // Find the first keyboard
-    let keyboard_info = manager
-        .first_device_of_type(DeviceType::Keyboard)
-        .ok_or_else(|| Error::Other("No keyboard found".to_string()))?;
-
-    println!("Using keyboard: {}", keyboard_info.name);
-
-    // Open the keyboard using the abstraction layer
-    let mut keyboard = manager.open_keyboard(keyboard_info)?;
-
-    // Initialize the device
-    keyboard.initialize()?;
-
-    match action {
-        ActuationAction::Set { mm } => {
-            println!("Setting actuation point to {:.1}mm", mm);
-
-            // Validate range
-            if !(0.1..=4.0).contains(&mm) {
-                return Err(Error::Other(
-                    "Actuation point must be between 0.1mm and 4.0mm".to_string(),
-                ));
-            }
-
-            keyboard.set_actuation_point_mm(mm)?;
-            keyboard.apply().await?;
-            println!("Actuation point set successfully!");
-        }
-
-        ActuationAction::SetValue { value } => {
-            println!("Setting actuation value to {}", value);
-
-            // Validate range
-            if !(1..=40).contains(&value) {
-                return Err(Error::InvalidConfig(
-                    "Actuation point value must be between 1 and 40".to_string(),
-                ));
-            }
-
-            keyboard.set_actuation_point(value)?;
-            keyboard.apply().await?;
-            println!("Actuation value set successfully!");
-        }
-    }
-
-    Ok(())
 }
 
 async fn cmd_per_key_rgb(keyboard: &mut Box<dyn Keyboard>, action: PerKeyAction) -> Result<()> {

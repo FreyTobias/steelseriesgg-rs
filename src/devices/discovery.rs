@@ -8,15 +8,15 @@ use tracing::{debug, info, warn};
 use super::headsets::nova7::{Nova7Headset, nova7_model};
 use super::headsets::{GenericHeadset, Headset};
 use super::hid_reports::ConnectionHealth;
-use super::keyboards::apex::Apex3Tkl;
+use super::keyboards::apex::{Apex3, Apex3Tkl};
 use super::keyboards::apex_m750::{ApexM750, CONTROL_INTERFACE as APEX_M750_CONTROL_INTERFACE};
 use super::keyboards::apex_pro_tkl_2023::ApexProTkl2023;
 use super::keyboards::{GenericKeyboard, Keyboard};
 use super::mice::Mouse;
 use super::mice::modern::{ModernMouse, model_for as mouse_model};
 use super::product_ids::{
-    APEX_3_TKL, APEX_5, APEX_7, APEX_7_TKL, APEX_9_MINI, APEX_9_TKL, APEX_M750, APEX_PRO, APEX_PRO_2024, APEX_PRO_TKL,
-    APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2, APEX_PRO_TKL_2024,
+    APEX_3, APEX_3_TKL, APEX_5, APEX_7, APEX_7_TKL, APEX_9_MINI, APEX_9_TKL, APEX_M750, APEX_PRO, APEX_PRO_2024,
+    APEX_PRO_TKL, APEX_PRO_TKL_2023, APEX_PRO_TKL_2023_WIRELESS, APEX_PRO_TKL_2023_WIRELESS_2, APEX_PRO_TKL_2024,
     APEX_PRO_TKL_WIRELESS_2024, APEX_PRO_TKL_WIRELESS_2024_DONGLE,
 };
 use super::{
@@ -491,6 +491,7 @@ impl DeviceManager {
         // do beyond lighting - the on-board profile path is answered by the class, so the class a product
         // ID is built as is one decision, taken by [`keyboard_class`].
         match keyboard_class(info.product_id) {
+            KeyboardClass::Apex3 => Ok(Box::new(Apex3::new(generic_keyboard))),
             KeyboardClass::Apex3Tkl => Ok(Box::new(Apex3Tkl::new(generic_keyboard))),
             KeyboardClass::ApexProTkl2023 => Ok(Box::new(ApexProTkl2023::new(generic_keyboard))),
             KeyboardClass::Apex7 => Ok(Box::new(super::keyboards::apex_7::Apex7::new(generic_keyboard))),
@@ -994,6 +995,7 @@ pub fn print_device_summary(manager: &DeviceManager) {
 /// `ApexProTkl2023` for their `[EXPERIMENTAL]` direct lighting frame, which answers no codec either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardClass {
+    Apex3,
     Apex3Tkl,
     ApexProTkl2023,
     Apex7,
@@ -1004,6 +1006,7 @@ pub enum KeyboardClass {
 #[must_use]
 pub fn keyboard_class(product_id: u16) -> KeyboardClass {
     match product_id {
+        APEX_3 => KeyboardClass::Apex3,
         APEX_3_TKL => KeyboardClass::Apex3Tkl,
         APEX_PRO
         | APEX_PRO_TKL_2023
@@ -1432,7 +1435,22 @@ mod tests {
         // The class is the on-board scope: build anything else for 0x1612 and the read has no codec to answer.
         assert_eq!(keyboard_class(APEX_7), KeyboardClass::Apex7);
         assert_eq!(keyboard_class(APEX_3_TKL), KeyboardClass::Apex3Tkl);
+        assert_eq!(keyboard_class(APEX_3), KeyboardClass::Apex3);
         assert_eq!(keyboard_class(APEX_PRO_TKL_2023), KeyboardClass::ApexProTkl2023);
+    }
+
+    #[test]
+    fn apex_3_zone_frame_fills_missing_zones_with_the_last_colour() {
+        use crate::devices::hid_reports::Apex3Command;
+        use crate::devices::keyboards::apex::Apex3;
+        use crate::rgb::Color;
+        let frame = Apex3::colors_frame(&[Color::RED, Color::BLUE]);
+        let Apex3Command::Colors(colors) = frame else {
+            panic!("a colour frame");
+        };
+        assert_eq!(colors[0], Color::RED);
+        assert!(colors[1..].iter().all(|&c| c == Color::BLUE));
+        assert_eq!(Apex3::colors_frame(&[]), Apex3Command::Colors([Color::BLACK; 10]));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use steelseries_gg::devices::KeyId;
+use steelseries_gg::devices::hid_reports::RapidTapPair;
 use steelseries_gg::rgb::Color;
 use steelseries_gg::{Error, Result};
 
@@ -43,7 +44,13 @@ pub(crate) enum Commands {
         action: ActuationAction,
     },
 
-    /// Control headsets (Arctis Nova 7 family only, EXPERIMENTAL and untested on hardware)
+    /// Apex Pro TKL 2023 OLED (EXPERIMENTAL and untested on hardware)
+    Oled {
+        #[command(subcommand)]
+        action: OledAction,
+    },
+
+    /// Control headsets (Arctis Nova 3/4/5/7, Nova Pro and Arctis 7+ families only, EXPERIMENTAL and untested on hardware)
     Headset {
         #[command(subcommand)]
         action: HeadsetAction,
@@ -248,6 +255,26 @@ pub(crate) enum OnboardAction {
     /// Make a keyboard run one of its on-board profile slots: GG's profile deploy frame (0x89). **This
     /// changes what the keyboard is running right now.** Hardware-confirmed on an Apex 7.
     Load(OnboardLoadArgs),
+
+    /// EXPERIMENTAL, untested on hardware: read one profile slot of the wired Apex Pro TKL 2023 (0x1628)
+    /// with the chunked read from GG's device spec. Read-only; nothing is written to the keyboard.
+    Gen3Read(OnboardGen3ReadArgs),
+}
+
+/// A read-only Gen3 on-board profile read.
+#[derive(clap::Args)]
+pub(crate) struct OnboardGen3ReadArgs {
+    /// Profile slot, 0-4 (GG's Config 1 is assumed to be slot 0; unverified)
+    #[arg(short, long, default_value = "0")]
+    pub(crate) slot: u8,
+
+    /// Where to write the 12,500-byte profile blob
+    #[arg(long, value_name = "FILE")]
+    pub(crate) bin: Option<PathBuf>,
+
+    /// Print the request frames instead of opening a keyboard
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 impl OnboardAction {
@@ -259,6 +286,7 @@ impl OnboardAction {
         match self {
             Self::Read(_) | Self::Load(_) => true,
             Self::Write(args) => !args.dry_run,
+            Self::Gen3Read(args) => !args.dry_run,
             Self::Decode(_) | Self::Encode(_) => false,
         }
     }
@@ -451,6 +479,28 @@ pub(crate) enum RgbAction {
         #[command(subcommand)]
         action: PerKeyAction,
     },
+
+    /// Apex Pro TKL 2023 (0x1628): leave direct-mode lighting so the board shows its stored profile again
+    /// (`00 41` from GG's device spec; EXPERIMENTAL, untested on hardware)
+    Release,
+}
+
+/// Apex Pro TKL 2023 (0x1628) OLED, from GG's device spec. EXPERIMENTAL, untested on hardware; the pixel
+/// packing of the 640 bytes is not in the spec.
+#[derive(Subcommand)]
+pub(crate) enum OledAction {
+    /// Send a raw 640-byte frame file to the OLED
+    Show {
+        file: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Hand the OLED back to the keyboard firmware
+    Reset {
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -501,19 +551,109 @@ pub(crate) enum MouseAction {
     },
 }
 
+/// The Apex Pro TKL 2023 (0x1628) settings below come from GG's device spec and are EXPERIMENTAL: never
+/// confirmed on hardware, and whether they survive unplugging is unknown. Each one sets every analog key.
 #[derive(Subcommand)]
 pub(crate) enum ActuationAction {
-    /// Set actuation point for all keys (global)
+    /// Set actuation point for all keys (global). Apex Pro TKL 2023: only 0.1, 1.0, 2.0 or 3.0 mm
     Set {
         /// Actuation point in millimeters (0.1 to 4.0mm, e.g., 1.2, 2.5, 3.6)
         mm: f32,
+        /// Apex Pro TKL 2023: set the second actuation layer instead
+        #[arg(long)]
+        second: bool,
+        /// Print the report instead of sending it (Apex Pro TKL 2023 frame)
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Set actuation point in 0.1mm increments (e.g., 4 = 0.4mm, 25 = 2.5mm)
     SetValue {
         /// Actuation value in 0.1mm units (1-40)
         value: u8,
+        /// Apex Pro TKL 2023: set the second actuation layer instead
+        #[arg(long)]
+        second: bool,
+        /// Print the report instead of sending it (Apex Pro TKL 2023 frame)
+        #[arg(long)]
+        dry_run: bool,
     },
+
+    /// Apex Pro TKL 2023: set the actuation of single keys, e.g. `set-key W=1.0 A=2.0`. The other keys keep the
+    /// values ssgg last sent, so run `set <mm>` once first; changes made in GG since then are not seen
+    SetKey {
+        /// KEY=MM pairs (key names as in `rgb perkey`; mm 0.1, 1.0, 2.0 or 3.0)
+        #[arg(required = true)]
+        keys: Vec<String>,
+        /// Set the second actuation layer instead
+        #[arg(long)]
+        second: bool,
+        /// Print the report instead of sending it
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Apex Pro TKL 2023: zero the second actuation layer (the state GG showed as no second actuation)
+    ClearSecond {
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Apex Pro TKL 2023: release mode of every analog key (0 = off; 2 and 3 were seen as Rapid Trigger and
+    /// Key Guard in GG's profile; 4 is unknown)
+    ReleaseMode {
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(["0", "2", "3", "4"]))]
+        mode: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Apex Pro TKL 2023: rapid-trigger sensitivity of every analog key (raw unit, GG's live value was 2)
+    RapidTrigger {
+        sensitivity: u8,
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Apex Pro TKL 2023: rapid tap on or off
+    RapidTap {
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(["on", "off"]))]
+        state: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Apex Pro TKL 2023: replace the rapid-tap pair list (none given clears it)
+    RapidTapPairs {
+        /// Up to 10 pairs as hex HID usages KEY1:KEY2[:MODE[:both]], e.g. 04:07 or 04:07:1:both (mode 0-3)
+        #[arg(value_parser = parse_rapid_tap_pair)]
+        pairs: Vec<RapidTapPair>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// `KEY1:KEY2[:MODE[:both]]`, hex usages.
+fn parse_rapid_tap_pair(text: &str) -> std::result::Result<RapidTapPair, String> {
+    let parts: Vec<&str> = text.split(':').collect();
+    let (hid_1, hid_2) = match parts.as_slice() {
+        [a, b, ..] if parts.len() <= 4 => (parse_hex_u8(a)?, parse_hex_u8(b)?),
+        _ => return Err(format!("{text}: expected KEY1:KEY2[:MODE[:both]]")),
+    };
+    let mode = parts
+        .get(2)
+        .map_or(Ok(0), |m| m.parse::<u8>().map_err(|e| format!("mode: {e}")))?;
+    let report_both = match parts.get(3) {
+        None => false,
+        Some(flag) if flag.eq_ignore_ascii_case("both") => true,
+        Some(flag) => return Err(format!("{flag}: the fourth field can only be `both`")),
+    };
+    Ok(RapidTapPair {
+        hid_1,
+        hid_2,
+        mode,
+        report_both,
+    })
 }
 
 #[derive(Subcommand)]

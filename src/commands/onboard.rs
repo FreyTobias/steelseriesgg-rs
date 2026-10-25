@@ -275,8 +275,69 @@ pub(crate) async fn cmd_onboard(mut manager: Option<&mut DeviceManager>, action:
                 args.profile
             );
         }
+
+        OnboardAction::Gen3Read(args) => cmd_gen3_read(manager, args).await?,
     }
 
+    Ok(())
+}
+
+/// `[EXPERIMENTAL]` Read-only Gen3 profile read of the wired Apex Pro TKL 2023 (`0x1628`), from GG's device spec.
+async fn cmd_gen3_read(manager: Option<&mut DeviceManager>, args: crate::cli::OnboardGen3ReadArgs) -> Result<()> {
+    use steelseries_gg::devices::hid_reports::{HidReportBuilder, PROFILE_CHUNK_REPORT_SIZE};
+    use steelseries_gg::devices::keyboards::apex_pro_tkl_2023::gen3_read_requests;
+    use steelseries_gg::devices::{DeviceType, HidDeviceType, product_ids};
+
+    let requests = gen3_read_requests(args.slot)?;
+    if args.dry_run {
+        let builder = HidReportBuilder::new(HidDeviceType::Keyboard);
+        println!(
+            "dry run, nothing sent: {} feature reports, each answered by a feature-report read [EXPERIMENTAL]",
+            requests.len()
+        );
+        for request in requests {
+            let mut buf = vec![0u8; PROFILE_CHUNK_REPORT_SIZE];
+            let size = builder.build_report(request, &mut buf)?;
+            super::apex_2023::print_report(&buf[..size]);
+        }
+        return Ok(());
+    }
+
+    let Some(manager) = manager else {
+        return Err(Error::Other("the Gen3 profile read needs a device".to_string()));
+    };
+    let info = manager
+        .devices_by_type(DeviceType::Keyboard)
+        .into_iter()
+        .find(|info| info.product_id == product_ids::APEX_PRO_TKL_2023)
+        .ok_or_else(|| Error::DeviceNotFound("no wired Apex Pro TKL 2023 (0x1628) connected".to_string()))?;
+    let mut keyboard = manager.open_keyboard(info)?;
+    crate::warn_if_gg_engine_running();
+    println!("reading slot {} on {} [EXPERIMENTAL, read-only]", args.slot, info.name);
+
+    let read = keyboard.read_gen3_profile(args.slot)?;
+    println!("firmware: {}", read.firmware.as_deref().unwrap_or("no answer"));
+    println!("{} chunks, {} bytes", read.headers.len(), read.data.len());
+    if let Some(first) = read.headers.first() {
+        let same = read.headers.iter().all(|h| h == first);
+        println!(
+            "first reply header: {first:02x?}{}",
+            if same { " (all equal)" } else { " (they differ)" }
+        );
+    }
+    println!(
+        "checksum at offset 12320: {}",
+        if read.checksum_ok() {
+            "matches"
+        } else {
+            "does NOT match"
+        }
+    );
+    let bin = args
+        .bin
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("apex-pro-tkl-2023-slot{}.bin", args.slot)));
+    secure_write_async(bin.clone(), read.data).await?;
+    println!("profile blob written to {}", bin.display());
     Ok(())
 }
 

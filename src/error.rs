@@ -84,3 +84,33 @@ impl From<&str> for Error {
         Error::Other(s.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_device_prints_both_ids_as_four_digit_hex() {
+        let err = Error::UnsupportedDevice {
+            vendor_id: 0x1038,
+            product_id: 0x0a,
+        };
+        assert_eq!(err.to_string(), "Unsupported device: vendor=0x1038, product=0x000a");
+    }
+
+    #[test]
+    fn string_conversions_become_other_and_print_unprefixed() {
+        assert_eq!(Error::from("boom").to_string(), "boom");
+        assert_eq!(Error::from(String::from("bang")).to_string(), "bang");
+    }
+
+    #[test]
+    fn io_errors_convert_with_the_question_mark_operator() {
+        fn fails() -> Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))?
+        }
+        let err = fails().unwrap_err();
+        assert!(matches!(err, Error::Io(_)));
+        assert_eq!(err.to_string(), "IO error: gone");
+    }
+}

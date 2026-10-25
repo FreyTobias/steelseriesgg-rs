@@ -11,7 +11,11 @@
 use std::collections::hash_map::RandomState;
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, Hasher};
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
@@ -33,6 +37,31 @@ const LIVE_JS: &str = include_str!("../tools/profile-gui/live.js");
 const MAIN_JS: &str = include_str!("../tools/profile-gui/main.js");
 const PRODUCTS_JS: &str = include_str!("../tools/profile-gui/products.generated.js");
 const STYLE_CSS: &str = include_str!("../tools/profile-gui/style.css");
+
+const CONTROL_JS: &str = include_str!("../tools/profile-gui/control.js");
+
+/// Subcommands the control panel may run. Left out because they never return or reopen this server:
+/// `gui`, `server`, `daemon`, `status`, `hid-logs`, `fuzz`; `remap` is allowed for `list` only (`run` grabs the keyboard).
+const CLI_COMMANDS: &[&str] = &[
+    "devices",
+    "rgb",
+    "actuation",
+    "oled",
+    "headset",
+    "mouse",
+    "profile",
+    "audio",
+    "sonar",
+    "pollrate",
+    "onboard",
+    "validate",
+    "performance",
+    "bug-report",
+    "test-device",
+    "verify-performance",
+];
+const CLI_TIMEOUT: Duration = Duration::from_secs(60);
+const CLI_OUTPUT_MAX: u64 = 256 * 1024;
 
 const TOKEN_HEADER: &str = "x-ssgg-token";
 const JS: &str = "text/javascript; charset=utf-8";
@@ -126,6 +155,7 @@ fn router(state: Arc<GuiState>) -> Router {
         .route("/api/rgb/color", post(color))
         .route("/api/rgb/brightness", post(brightness))
         .route("/api/rgb/off", post(off))
+        .route("/api/cli", post(cli))
         .fallback_service(get(asset).with_state(state.clone()))
         .with_state(state)
 }
@@ -190,6 +220,7 @@ async fn asset(State(state): State<Arc<GuiState>>, headers: HeaderMap, uri: Uri)
     let (content_type, body) = match uri.path() {
         "/" | "/index.html" => ("text/html; charset=utf-8", state.index.as_str()),
         "/app.js" => (JS, APP_JS),
+        "/control.js" => (JS, CONTROL_JS),
         "/live.js" => (JS, LIVE_JS),
         "/main.js" => (JS, MAIN_JS),
         "/products.generated.js" => (JS, PRODUCTS_JS),
@@ -273,9 +304,115 @@ async fn run_lighting(state: Arc<GuiState>, op: LightingOp) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct CliBody {
+    args: Vec<String>,
+}
+
+fn cli_allowed(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("remap") => args.get(1).map(String::as_str) == Some("list"),
+        Some(command) => CLI_COMMANDS.contains(&command),
+        None => false,
+    }
+}
+
+/// The `ssgg` binary: this process under `ssgg gui`, the sibling of `ssgg-gui` in the desktop app.
+fn ssgg_exe() -> Option<PathBuf> {
+    let me = std::env::current_exe().ok()?;
+    if me.file_stem()? == "ssgg" {
+        return Some(me);
+    }
+    let sibling = me
+        .with_file_name("ssgg")
+        .with_extension(std::env::consts::EXE_EXTENSION);
+    sibling.is_file().then_some(sibling)
+}
+
+fn drain(pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // A read error keeps what arrived so far; the exit status carries the verdict.
+        let _ = pipe.take(CLI_OUTPUT_MAX).read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
+/// Run `ssgg <args>` to completion or kill it after `CLI_TIMEOUT`.
+fn run_cli(exe: &Path, args: &[String]) -> std::io::Result<serde_json::Value> {
+    let mut command = Command::new(exe);
+    command
+        .args(args)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_NO_WINDOW: the windowed desktop app must not flash a console per call.
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
+    let started = Instant::now();
+    let (code, timed_out) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (status.code(), false);
+        }
+        if started.elapsed() >= CLI_TIMEOUT {
+            // Already exited between the check and the kill is fine: wait() reaps it either way.
+            let _ = child.kill();
+            let _ = child.wait();
+            break (None, true);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let text = |handle: Option<std::thread::JoinHandle<String>>| handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    Ok(serde_json::json!({
+        "ok": code == Some(0),
+        "code": code,
+        "timed_out": timed_out,
+        "stdout": text(stdout),
+        "stderr": text(stderr),
+    }))
+}
+
+/// Run one `ssgg` command for the control panel, so the GUI offers whatever the CLI does.
+async fn cli(State(state): State<Arc<GuiState>>, headers: HeaderMap, Json(body): Json<CliBody>) -> Response {
+    if !authorized(&state, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !cli_allowed(&body.args) {
+        return error_response(StatusCode::BAD_REQUEST, "that command is not available from the GUI");
+    }
+    let Some(exe) = ssgg_exe() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "the ssgg binary was not found");
+    };
+    match tokio::task::spawn_blocking(move || run_cli(&exe, &body.args)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(e)) => error_response(StatusCode::BAD_GATEWAY, format!("could not run ssgg: {e}")),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("command task failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_listed_subcommands_run_and_remap_only_lists() {
+        let args = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(cli_allowed(&args(&["actuation", "set", "1.0"])));
+        assert!(cli_allowed(&args(&["remap", "list"])));
+        assert!(!cli_allowed(&args(&["remap", "run"])));
+        for blocked in ["gui", "daemon", "server", "status", "hid-logs", "fuzz", "--debug"] {
+            assert!(!cli_allowed(&args(&[blocked])), "{blocked}");
+        }
+        assert!(!cli_allowed(&[]));
+    }
+
     use axum::http::HeaderValue;
     use std::io::{Read, Write};
     use std::net::TcpStream;

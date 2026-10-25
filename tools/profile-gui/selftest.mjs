@@ -1873,6 +1873,37 @@ ok('index.html loads live.js after app.js with a hidden panel, and app.js itself
     && /id="liveBox"[^>]*hidden/.test(html) && !/\bfetch\s*\(/.test(app.source) && /\.live\[hidden\]/.test(style);
 });
 
+// --- device control (control.js) --------------------------------------------
+console.log('device control panel, served only by ssgg gui');
+const controlSandbox = {};
+vm.runInNewContext(read('tools/profile-gui/control.js'), controlSandbox, { filename: 'control.js' });
+const control = controlSandbox.SsggControl;
+const controlCmd = (...args) => control.GROUPS.flatMap(([, list]) => list).find((c) => c.args.join(' ') === args.join(' '));
+ok('argv is built from the command, its flags and its positionals', () => {
+  const set = controlCmd('actuation', 'set');
+  const effect = controlCmd('rgb', 'effect');
+  return eq(control.buildArgs(set, ['1.5', true, false]), ['actuation', 'set', '--second', '1.5'])
+    && eq(control.buildArgs(effect, ['wave', '2']), ['rgb', 'effect', '--speed', '2', 'wave'])
+    && eq(control.buildArgs(controlCmd('actuation', 'set-key'), ['W=1.0  A=2.0', false, true]), ['actuation', 'set-key', '--dry-run', 'W=1.0', 'A=2.0']);
+});
+ok('an empty required value throws, an empty optional one is left out, a negative number goes after --', () => {
+  let message = '';
+  try { control.buildArgs(controlCmd('headset', 'sidetone'), ['']); } catch (e) { message = e.message; }
+  return message === 'level 0-100 is required'
+    && eq(control.buildArgs(controlCmd('actuation', 'rapid-tap-pairs'), ['', false]), ['actuation', 'rapid-tap-pairs'])
+    && eq(control.buildArgs(controlCmd('audio', 'chat-mix'), ['-50']), ['audio', 'chat-mix', '--', '-50'])
+    && eq(control.buildArgs(controlCmd('audio', 'mute'), ['game', 'toggle']), ['audio', 'mute', 'game']);
+});
+ok('every ssgg action the CLI has for actuation is in the panel', () => {
+  const have = control.GROUPS.flatMap(([, list]) => list).filter((c) => c.args[0] === 'actuation').map((c) => c.args[1]).sort();
+  return eq(have, ['clear-second', 'rapid-tap', 'rapid-tap-pairs', 'rapid-trigger', 'release-mode', 'set', 'set-key', 'set-value']);
+});
+ok('index.html loads control.js after live.js with a hidden panel', () => {
+  const html = read('tools/profile-gui/index.html');
+  return html.indexOf('src="live.js"') > 0 && html.indexOf('src="live.js"') < html.indexOf('src="control.js"')
+    && /id="controlBox"[^>]*hidden/.test(html);
+});
+
 await Promise.all(pending);
 
 console.log('');

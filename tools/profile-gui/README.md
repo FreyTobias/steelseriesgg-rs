@@ -4,7 +4,7 @@ A browser page that reads the JSON dumps `ssgg onboard read` and
 `ssgg onboard decode` write (by default into a file named from the profile name in the
 image: `Config 1` -> `config_1.json`), edits them on a drawn keyboard, and saves
 the JSON back. No build step, no dependencies: plain files
-(`index.html`, `style.css`, `app.js`, `main.js`, `live.js`, the generated `products.generated.js`).
+(`index.html`, `style.css`, `app.js`, `main.js`, `live.js`, `control.js`, the generated `products.generated.js`).
 
 `read` writes that report directly: it decodes the image it pulled. The per-pull read
 record (`read --report FILE` - chunk headers, framing stats, image hash) is capture telemetry, not a

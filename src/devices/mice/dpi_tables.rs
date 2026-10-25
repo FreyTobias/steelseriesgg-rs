@@ -25,3 +25,25 @@ pub const TRUEMOVE_AIR: [u8; 180] = [
     0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBF, 0xC0, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB,
     0xCC, 0xCD, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD5, 0xD6,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A table indexed by `(dpi - min) / 100` must hold one entry per 100 DPI step of the sensor's range, and
+    /// its codes must rise with DPI, so a mistyped or dropped entry fails here instead of on a mouse.
+    fn assert_table(table: &[u8], min_dpi: usize, max_dpi: usize) {
+        assert_eq!(table.len(), (max_dpi - min_dpi) / 100 + 1, "one code per 100 DPI step");
+        assert!(table.windows(2).all(|w| w[0] < w[1]), "codes must strictly increase");
+    }
+
+    #[test]
+    fn truemove_core_covers_200_to_8500_dpi() {
+        assert_table(&TRUEMOVE_CORE, 200, 8500);
+    }
+
+    #[test]
+    fn truemove_air_covers_100_to_18000_dpi() {
+        assert_table(&TRUEMOVE_AIR, 100, 18000);
+    }
+}

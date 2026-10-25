@@ -1168,4 +1168,12 @@ mod tests {
         assert!(Cli::try_parse_from(["ssgg", "mouse", "save"]).is_err());
         assert!(Cli::try_parse_from(["ssgg", "pollrate", "mouse", "1000"]).is_ok());
     }
+
+    /// clap only checks its own definition (duplicate flags, bad defaults, conflicting shorts) when a
+    /// command is built; without this a bad definition surfaces as a panic on the user's first run.
+    #[test]
+    fn the_clap_definition_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
 }

@@ -111,6 +111,36 @@ jobs:
       - name: Run tests
         run: cargo test --locked ${{ matrix.features }}
 
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --locked
+
+  profile-gui:
+    name: Profile GUI selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run selftest
+        run: node tools/profile-gui/selftest.mjs
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -155,3 +185,19 @@ jobs:
 
       - name: Check binary exists
         run: test -f target/release/ssgg
+
+  # Single required status check for branch protection: fails if any job above failed or was cancelled.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [fmt, clippy, test, test-windows, profile-gui, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq 'failure|cancelled'; then exit 1; fi

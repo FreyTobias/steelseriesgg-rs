@@ -55,6 +55,15 @@
   ],
   "customManagers": [
     {
+      "description": "Keep the MSRV on the latest stable Rust, alongside the CI toolchain pins",
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Cargo\\.toml$/"],
+      "matchStrings": ["rust-version = \"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "rust",
+      "packageNameTemplate": "rust-lang/rust",
+      "datasourceTemplate": "github-releases"
+    },
+    {
       "customType": "jsonata",
       "datasourceTemplate": "npm",
       "depNameTemplate": "@biomejs/biome",

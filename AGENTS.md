@@ -31,7 +31,7 @@ src/devices/headsets/          generic headset + nova7.rs (Arctis Nova 7 family,
 src/devices/mice/              rivalcfg Modern family mice (modern.rs, dpi_tables.rs; experimental)
 src/gamesense/server.rs        Axum HTTP server (port 27301)
 src/audio/                     feature `audio` (pulse.rs) and `sonar` (sonar.rs)
-src/gui.rs                     editor + lighting API server, shared by `ssgg gui` and `ssgg-gui` (lib module)
+src/gui.rs                     editor + lighting API server, served by `ssgg-gui` (lib module)
 src/bin/                       helper binaries, not part of `ssgg` (discover_actuation probes actuation firmware;
                                ssgg-gui = native window around the editor, feature `desktop`)
 examples/                      device_readback.rs (hardware read-back example)

@@ -1,5 +1,5 @@
 // Live lighting panel: the only part of this page that talks to a device, and only when the page was served by
-// `ssgg gui`. Served from a file or any other server there is no token, so the panel never appears. Plain script
+// `ssgg-gui`. Served from a file or any other server there is no token, so the panel never appears. Plain script
 // (not a module) for the same reason app.js is: a page opened from the filesystem refuses module scripts.
 'use strict';
 
@@ -12,7 +12,7 @@
     return match ? match[1].toUpperCase() : null;
   }
 
-  // `ssgg gui` serves the page with its per-run token in a meta tag; no tag means no live lighting.
+  // `ssgg-gui` serves the page with its per-run token in a meta tag; no tag means no live lighting.
   function tokenFrom(doc) {
     const meta = doc.querySelector('meta[name="ssgg-live-token"]');
     return meta ? meta.getAttribute('content') : null;

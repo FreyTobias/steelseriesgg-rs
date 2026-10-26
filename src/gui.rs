@@ -1,4 +1,5 @@
-//! `ssgg gui`: serves the profile editor in `tools/profile-gui` and the small lighting API its live panel calls.
+//! The server behind `ssgg-gui`: the profile editor in `tools/profile-gui` and the small lighting API its live panel
+//! calls.
 //!
 //! Everything listens on 127.0.0.1 only. The GameSense server is deliberately not reused: it is a game-facing
 //! endpoint with its own CORS rule, while this one needs no CORS at all because the page is served from the
@@ -317,7 +318,7 @@ fn cli_allowed(args: &[String]) -> bool {
     }
 }
 
-/// The `ssgg` binary: this process under `ssgg gui`, the sibling of `ssgg-gui` in the desktop app.
+/// The `ssgg` binary: the sibling of `ssgg-gui` in the desktop app.
 fn ssgg_exe() -> Option<PathBuf> {
     let me = std::env::current_exe().ok()?;
     if me.file_stem()? == "ssgg" {

@@ -1841,7 +1841,7 @@ ok('the bottom row draws LWin between LCtrl and LAlt, and the drawing order leav
 }, () => [app.LAYOUT.filter((k) => k.y === 5.3).map((k) => k.hid), app.LAYOUT.filter((k) => k.y === 5.3).map((k) => [k.hid, k.x])]);
 
 // --- live lighting (live.js) ------------------------------------------------
-console.log('live lighting panel, served only by ssgg gui');
+console.log('live lighting panel, served only by ssgg-gui');
 const liveSandbox = {};
 vm.runInNewContext(read('tools/profile-gui/live.js'), liveSandbox, { filename: 'live.js' });
 const live = liveSandbox.SsggLive;
@@ -1874,7 +1874,7 @@ ok('index.html loads live.js after app.js with a hidden panel, and app.js itself
 });
 
 // --- device control (control.js) --------------------------------------------
-console.log('device control panel, served only by ssgg gui');
+console.log('device control panel, served only by ssgg-gui');
 const controlSandbox = {};
 vm.runInNewContext(read('tools/profile-gui/control.js'), controlSandbox, { filename: 'control.js' });
 const control = controlSandbox.SsggControl;

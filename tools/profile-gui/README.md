@@ -12,7 +12,7 @@ profile, and this page does not open it.
 
 The editor (`app.js`) is a **file editor only**. It never opens a device node and writes nothing to
 a keyboard - the bytes it saves are what `ssgg onboard write` sends. The one exception is the live
-lighting panel (`live.js`), which appears only when the page is served by `ssgg gui` (below). The protocol behind them is
+lighting panel (`live.js`), which appears only when the page is served by `ssgg-gui` (below). The protocol behind them is
 reverse-engineered from GG captures of one Apex 7 (`0x1612`) and from GG's own device specifications. Its read, write and deploy are confirmed on
 that board, and decode and encode match GG for clean and modified profiles.
 
@@ -36,13 +36,9 @@ The window talks to the server below on a random loopback port; it only navigate
 saves into the Downloads folder (the webview's default; there is no save dialog). A blank window on NVIDIA under
 Wayland is a known WebKitGTK renderer problem: start with `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
 
-### Live lighting (`ssgg gui`)
+### Live lighting (`ssgg-gui`)
 
-```sh
-ssgg gui            # http://127.0.0.1:8765/, then Ctrl+C
-```
-
-`ssgg gui` serves these files and a small lighting API on 127.0.0.1 only, and opens the first keyboard
+`ssgg-gui` serves these files and a small lighting API on 127.0.0.1 only, and opens the first keyboard
 (as `ssgg rgb` does). The page shows a **Live lighting** panel (colour, brightness, off) when that keyboard
 opened; opened from a file or any other server there is no panel. **`[EXPERIMENTAL]`**: the calls are the ones
 `ssgg rgb color|brightness|off` sends, and only a solid colour on the wired Apex Pro TKL 2023 (`0x1628`) is

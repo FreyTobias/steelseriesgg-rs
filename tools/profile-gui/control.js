@@ -1,6 +1,6 @@
 // Device control panel: every `ssgg` subcommand that returns, as a form. Each entry is the argv of the CLI
 // command plus its fields, and Run sends that argv to `/api/cli`, which runs the real binary - so the page can
-// never do more than the CLI does. Like live.js it appears only when `ssgg gui` served the page.
+// never do more than the CLI does. Like live.js it appears only when `ssgg-gui` served the page.
 // Plain script (not a module) for the same reason app.js is.
 'use strict';
 

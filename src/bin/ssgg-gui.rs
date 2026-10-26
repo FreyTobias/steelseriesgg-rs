@@ -1,6 +1,6 @@
 //! `ssgg-gui`: the profile editor in a native window (feature `desktop`).
 //!
-//! The editor and its lighting API are the ones `ssgg gui` serves; this binary runs that server on an ephemeral
+//! The editor and its lighting API come from `steelseries_gg::gui`; this binary runs that server on an ephemeral
 //! loopback port and points a webview at it: WebView2 on Windows, WebKitGTK on Linux (GTK picks Wayland itself).
 
 // A console window would sit next to the app when launched from a shortcut.

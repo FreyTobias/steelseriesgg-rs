@@ -499,7 +499,7 @@ pub(crate) enum HeadsetAction {
     /// Show battery, connection, charging and ChatMix
     Status,
 
-    /// Set sidetone (0-100, mapped onto the headset's 4 steps)
+    /// Set sidetone (0-100, mapped onto the headset's steps: 4 on most models, 11 on the Nova 5 family)
     Sidetone {
         /// Sidetone level
         level: u8,
@@ -511,7 +511,8 @@ pub(crate) enum HeadsetAction {
         minutes: u8,
     },
 
-    /// Set microphone volume (0-100, mapped onto the headset's 8 steps)
+    /// Set microphone volume (0-100, mapped onto the headset's steps: 8 on the Nova 7, 7 on the Arctis 7+, 10 on
+    /// the Nova Pro, 16 on the Nova 5 family)
     MicVolume {
         /// Microphone volume
         level: u8,

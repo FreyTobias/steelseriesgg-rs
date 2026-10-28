@@ -127,10 +127,11 @@ GG names PID `0x1628` `apex_pro_tkl_2022` regardless of the retail year.
 
 ### Arctis Nova 7 family protocol [EXPERIMENTAL]
 
-Source: two community forks. Nothing here has been run from `ssgg` on hardware, so every command is
-Experimental (see `.claude/rules/experimental-protocol.md`). Code: `src/devices/headsets/nova7.rs`
-(per-PID table `NOVA7_MODELS`) and `HeadsetSettingCommand` / `HeadsetStatusQueryCommand` in
-`src/devices/hid_reports.rs`.
+Source: two community forks and GG's decrypted device specs (`base_arctis_7_plus_tx`, `base_arctis_nova_5_tx`,
+`base_arctis_nova_pro` and others, named in the code comments). Nothing here has been run from `ssgg` on hardware,
+so every command is Experimental (see `.claude/rules/experimental-protocol.md`). Code:
+`src/devices/headsets/nova7.rs` (per-PID table `NOVA7_MODELS`) and `HeadsetSettingCommand` /
+`HeadsetStatusQueryCommand` in `src/devices/hid_reports.rs`.
 
 - Transport: 64-byte output reports `00 <opcode> <arg>` zero padded (byte 0 is the hidapi report number), on the
   vendor control collection (usage page `0xFFC0`, interface 3 in the forks). `control_score` already ranks that
